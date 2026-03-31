@@ -1,0 +1,14 @@
+{
+  "X-API": {
+    "description": "twitterapi.io 上获取的 API key",
+    "type": "string"
+  },
+  "TARGET_ACCOUNT": {
+    "description": "要监控的推特账号，例如 elonmusk",
+    "type": "string"
+  },
+  "CHECK_INTERVAL": {
+    "description": "检查间隔，单位秒，默认 300",
+    "type": "integer"
+  }
+}
