@@ -35,6 +35,14 @@ class TweetHistoryRecord:
         return f"https://x.com/{account}/status/{self.tweet_id}"
 
 
+@dataclass(frozen=True)
+class UserAvatarRecord:
+    account: str
+    profile_picture_url: str
+    avatar_base64: str
+    stored_at: str
+
+
 class TweetHistoryStore:
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
@@ -146,6 +154,65 @@ class TweetHistoryStore:
             )
         return self._record_from_row(rows[0])
 
+    def get_user_avatar(self, account: str | None) -> UserAvatarRecord | None:
+        normalized = self._normalize_account(account)
+        if normalized is None:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM user_avatar_cache
+                WHERE lower(account) = ?
+                LIMIT 1
+                """,
+                (normalized.lower(),),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._avatar_record_from_row(row)
+
+    def save_user_avatar(
+        self,
+        account: str | None,
+        *,
+        profile_picture_url: str,
+        avatar_base64: str,
+    ) -> UserAvatarRecord:
+        normalized = self._normalize_account(account)
+        if normalized is None:
+            raise ValueError("缺少用户账号，无法保存头像缓存")
+        if not avatar_base64:
+            raise ValueError("缺少头像 base64，无法保存头像缓存")
+
+        stored_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO user_avatar_cache (
+                    account,
+                    profile_picture_url,
+                    avatar_base64,
+                    stored_at
+                )
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    profile_picture_url = excluded.profile_picture_url,
+                    avatar_base64 = excluded.avatar_base64,
+                    stored_at = excluded.stored_at
+                """,
+                (
+                    normalized,
+                    str(profile_picture_url),
+                    str(avatar_base64),
+                    stored_at,
+                ),
+            )
+        record = self.get_user_avatar(normalized)
+        if record is None:  # pragma: no cover - sqlite failure guard.
+            raise RuntimeError("用户头像缓存写入失败")
+        return record
+
     @staticmethod
     def normalize_short_id(value: str | None) -> str:
         if value is None:
@@ -181,6 +248,16 @@ class TweetHistoryStore:
                 ON tweet_history(stored_at)
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS user_avatar_cache (
+                    account TEXT PRIMARY KEY,
+                    profile_picture_url TEXT NOT NULL,
+                    avatar_base64 TEXT NOT NULL,
+                    stored_at TEXT NOT NULL
+                )
+                """
+            )
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.db_path)
@@ -198,6 +275,15 @@ class TweetHistoryStore:
             tweet_id=cls._string_or_none(row["tweet_id"]),
             account=cls._string_or_none(row["account"]),
             created_at=cls._string_or_none(row["created_at"]),
+            stored_at=str(row["stored_at"]),
+        )
+
+    @staticmethod
+    def _avatar_record_from_row(row: sqlite3.Row) -> UserAvatarRecord:
+        return UserAvatarRecord(
+            account=str(row["account"]),
+            profile_picture_url=str(row["profile_picture_url"]),
+            avatar_base64=str(row["avatar_base64"]),
             stored_at=str(row["stored_at"]),
         )
 

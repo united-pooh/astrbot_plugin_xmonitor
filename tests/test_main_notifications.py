@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import ast
+import base64
+import binascii
 import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 from history_store import TweetHistoryLookupCollision, TweetHistoryStore
 
@@ -88,6 +91,9 @@ class FakeHistoryStore:
     def __init__(self, records=None) -> None:
         self.records = list(records or [])
         self.added = []
+        self.avatar_records = {}
+        self.avatar_gets = []
+        self.avatar_saves = []
         self.lookup_error = None
 
     def add_tweet(self, tweet, *, account=None):
@@ -115,6 +121,22 @@ class FakeHistoryStore:
                 return record
         return None
 
+    def get_user_avatar(self, account):
+        normalized = str(account or "").strip().lstrip("@")
+        self.avatar_gets.append(normalized)
+        return self.avatar_records.get(normalized.lower())
+
+    def save_user_avatar(self, account, *, profile_picture_url, avatar_base64):
+        normalized = str(account or "").strip().lstrip("@")
+        record = FakeAvatarRecord(
+            account=normalized,
+            profile_picture_url=profile_picture_url,
+            avatar_base64=avatar_base64,
+        )
+        self.avatar_records[normalized.lower()] = record
+        self.avatar_saves.append(record)
+        return record
+
 
 class FakeHistoryRecord:
     def __init__(
@@ -130,6 +152,21 @@ class FakeHistoryRecord:
         self.original_text = original_text
         self.tweet = tweet
         self.created_at = created_at
+        self.stored_at = stored_at
+
+
+class FakeAvatarRecord:
+    def __init__(
+        self,
+        *,
+        account,
+        profile_picture_url,
+        avatar_base64,
+        stored_at="2024-05-01T09:02:00+08:00",
+    ) -> None:
+        self.account = account
+        self.profile_picture_url = profile_picture_url
+        self.avatar_base64 = avatar_base64
         self.stored_at = stored_at
 
 
@@ -173,10 +210,15 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         "MessageChain": FakeMessageChain,
         "StarTools": FakeStarTools,
         "asyncio": asyncio,
+        "base64": base64,
+        "binascii": binascii,
+        "httpx": __import__("httpx"),
+        "urlparse": urlparse,
         "logger": logger,
         "PLUGIN_DIR": REPO_ROOT,
         "DEFAULT_FONT_DIR": REPO_ROOT / "data" / "fonts",
         "DEFAULT_FONT_DOWNLOADS": (),
+        "DEFAULT_EMOJI_FONT_DOWNLOADS": (),
         "_download_font_file": lambda url, output_path: None,
         "render_to_base64": render_to_base64_func,
         "re": __import__("re"),
@@ -194,15 +236,22 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         "_start_font_bootstrap_task",
         "_ensure_render_fonts",
         "_wait_for_font_bootstrap",
+        "_target_account_name",
         "_format_created_at",
         "_build_tweet_display_lines",
         "_build_notification_message",
         "_build_text_message_chain",
         "_build_tweet_image_message_chain",
         "_build_render_options",
+        "_cached_avatar_image_source",
         "_render_tweet_to_base64",
         "_send_text_fallback",
         "notify_subscribers",
+        "_ensure_target_avatar_cached",
+        "_fetch_profile_picture_url",
+        "_extract_profile_picture_url",
+        "_download_avatar_bytes",
+        "_is_valid_avatar_url",
         "_store_tweets_history",
         "_normalize_history_short_id",
         "_parse_x_command",
@@ -220,6 +269,7 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         )
 
     class Probe:
+        TWITTER_USER_INFO_URL = "https://api.twitterapi.io/twitter/user/info"
         _extract_tweet_id = staticmethod(_unwrap(namespace["_extract_tweet_id"]))
         _sanitize_tweet_text = staticmethod(_unwrap(namespace["_sanitize_tweet_text"]))
         _parse_tweet_datetime = staticmethod(
@@ -236,6 +286,7 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         _start_font_bootstrap_task = _unwrap(namespace["_start_font_bootstrap_task"])
         _ensure_render_fonts = _unwrap(namespace["_ensure_render_fonts"])
         _wait_for_font_bootstrap = _unwrap(namespace["_wait_for_font_bootstrap"])
+        _target_account_name = _unwrap(namespace["_target_account_name"])
         _format_created_at = _unwrap(namespace["_format_created_at"])
         _build_tweet_display_lines = _unwrap(namespace["_build_tweet_display_lines"])
         _build_notification_message = _unwrap(namespace["_build_notification_message"])
@@ -244,9 +295,19 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
             namespace["_build_tweet_image_message_chain"]
         )
         _build_render_options = _unwrap(namespace["_build_render_options"])
+        _cached_avatar_image_source = _unwrap(namespace["_cached_avatar_image_source"])
         _render_tweet_to_base64 = _unwrap(namespace["_render_tweet_to_base64"])
         _send_text_fallback = _unwrap(namespace["_send_text_fallback"])
         notify_subscribers = _unwrap(namespace["notify_subscribers"])
+        _ensure_target_avatar_cached = _unwrap(
+            namespace["_ensure_target_avatar_cached"]
+        )
+        _fetch_profile_picture_url = _unwrap(namespace["_fetch_profile_picture_url"])
+        _extract_profile_picture_url = staticmethod(
+            _unwrap(namespace["_extract_profile_picture_url"])
+        )
+        _download_avatar_bytes = _unwrap(namespace["_download_avatar_bytes"])
+        _is_valid_avatar_url = staticmethod(_unwrap(namespace["_is_valid_avatar_url"]))
         _store_tweets_history = _unwrap(namespace["_store_tweets_history"])
         _normalize_history_short_id = staticmethod(
             _unwrap(namespace["_normalize_history_short_id"])
@@ -336,6 +397,147 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
             captured_options,
             [{"source_logo": "/tmp/xmonitor-source-logo.png"}],
         )
+
+    async def test_notify_subscribers_prefers_cached_avatar_from_database(self) -> None:
+        captured_options = []
+
+        def render(tweet, options=None):
+            captured_options.append(options)
+            return f"png-{tweet['id']}"
+
+        Probe, StarTools, _logger = _build_probe(render)
+        probe = Probe()
+        probe.subscribe_groups = ["group-1"]
+        probe.notify_user = None
+        probe.target_account = "@Blue_ArchiveJP"
+        probe.source_logo = None
+        probe.history_store = FakeHistoryStore()
+        probe.history_store.avatar_records["blue_archivejp"] = FakeAvatarRecord(
+            account="Blue_ArchiveJP",
+            profile_picture_url="https://pbs.twimg.com/profile_images/avatar.jpg",
+            avatar_base64=base64.b64encode(b"avatar-bytes").decode("ascii"),
+        )
+
+        await probe.notify_subscribers([_tweet("1", "hello")])
+
+        self.assertEqual(len(StarTools.calls), 1)
+        self.assertEqual(captured_options, [{"avatar": b"avatar-bytes"}])
+
+    async def test_notify_subscribers_passes_configured_emoji_font_paths(self) -> None:
+        captured_options = []
+
+        def render(tweet, options=None):
+            captured_options.append(options)
+            return f"png-{tweet['id']}"
+
+        Probe, _StarTools, _logger = _build_probe(render)
+        probe = Probe()
+        probe.subscribe_groups = ["group-1"]
+        probe.notify_user = None
+        probe.target_account = ""
+        probe.source_logo = None
+        probe.auto_download_fonts = True
+        probe.font_paths = []
+        probe.bold_font_paths = []
+        probe.emoji_font_paths = ["/fonts/Twemoji.ttf"]
+        probe.auto_font_paths = []
+        probe.auto_bold_font_paths = []
+        probe.auto_emoji_font_paths = ["/data/fonts/NotoColorEmoji.ttf"]
+
+        await probe.notify_subscribers([_tweet("1", "hello")])
+
+        self.assertEqual(
+            captured_options,
+            [
+                {
+                    "emoji_font_paths": [
+                        "/fonts/Twemoji.ttf",
+                        "/data/fonts/NotoColorEmoji.ttf",
+                    ]
+                }
+            ],
+        )
+
+    async def test_ensure_target_avatar_cached_fetches_user_info_and_saves_base64(
+        self,
+    ) -> None:
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict:
+                return {
+                    "status": "success",
+                    "data": {
+                        "profilePicture": "https://pbs.twimg.com/profile_images/a.jpg"
+                    },
+                }
+
+        class Client:
+            def __init__(self) -> None:
+                self.calls = []
+
+            async def get(self, url, *, headers, params):
+                self.calls.append((url, headers, params))
+                return Response()
+
+        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
+        probe = Probe()
+        probe.api_key = "secret"
+        probe.target_account = "@Blue_ArchiveJP"
+        probe.history_store = FakeHistoryStore()
+        downloaded_urls = []
+
+        async def download(profile_picture_url):
+            downloaded_urls.append(profile_picture_url)
+            return b"avatar-bytes"
+
+        probe._download_avatar_bytes = download
+        client = Client()
+
+        await probe._ensure_target_avatar_cached(client)
+
+        self.assertEqual(
+            client.calls,
+            [
+                (
+                    probe.TWITTER_USER_INFO_URL,
+                    {"X-API-Key": "secret"},
+                    {"userName": "Blue_ArchiveJP"},
+                )
+            ],
+        )
+        self.assertEqual(downloaded_urls, ["https://pbs.twimg.com/profile_images/a.jpg"])
+        self.assertEqual(len(probe.history_store.avatar_saves), 1)
+        saved = probe.history_store.avatar_saves[0]
+        self.assertEqual(saved.account, "Blue_ArchiveJP")
+        self.assertEqual(
+            saved.avatar_base64,
+            base64.b64encode(b"avatar-bytes").decode("ascii"),
+        )
+
+    async def test_ensure_target_avatar_cached_skips_existing_avatar(self) -> None:
+        class Client:
+            calls = []
+
+            async def get(self, url, *, headers, params):
+                self.calls.append((url, headers, params))
+                raise AssertionError("user/info should not be called")
+
+        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
+        probe = Probe()
+        probe.api_key = "secret"
+        probe.target_account = "Blue_ArchiveJP"
+        probe.history_store = FakeHistoryStore()
+        probe.history_store.avatar_records["blue_archivejp"] = FakeAvatarRecord(
+            account="Blue_ArchiveJP",
+            profile_picture_url="https://pbs.twimg.com/profile_images/a.jpg",
+            avatar_base64="YXZhdGFy",
+        )
+
+        await probe._ensure_target_avatar_cached(Client())
+
+        self.assertEqual(probe.history_store.avatar_saves, [])
 
     async def test_render_failure_falls_back_to_text_and_continues(self) -> None:
         def render(tweet, options=None):

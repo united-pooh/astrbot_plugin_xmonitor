@@ -1,8 +1,11 @@
 import asyncio
+import base64
+import binascii
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 import httpx
@@ -42,6 +45,13 @@ DEFAULT_FONT_DOWNLOADS = (
         "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf",
     ),
 )
+DEFAULT_EMOJI_FONT_DOWNLOADS = (
+    (
+        "NotoColorEmoji.ttf",
+        "https://raw.githubusercontent.com/googlefonts/noto-emoji/main/"
+        "fonts/NotoColorEmoji.ttf",
+    ),
+)
 
 
 def _download_font_file(url: str, output_path: Path) -> None:
@@ -72,9 +82,15 @@ def _download_font_file(url: str, output_path: Path) -> None:
             pass
 
 
-@register("astrbot_plugin_xmonitor", "united_pooh", "一个api调用器", "1.0.0")
+@register(
+    "astrbot_plugin_xmonitor",
+    "united_pooh",
+    "监控 X/Twitter 账号并渲染推文图片",
+    "1.0.1",
+)
 class XMonitor(Star):
     TWITTER_SEARCH_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
+    TWITTER_USER_INFO_URL = "https://api.twitterapi.io/twitter/user/info"
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
@@ -230,10 +246,17 @@ class XMonitor(Star):
         self.bold_font_paths = self._normalize_path_list(
             self.config.get("BOLD_FONT_PATHS")
         )
+        self.emoji_font_paths = self._normalize_path_list(
+            self.config.get("EMOJI_FONT_PATHS")
+        )
         auto_paths = [DEFAULT_FONT_DIR / name for name, _url in DEFAULT_FONT_DOWNLOADS]
         self.auto_font_paths = [str(path) for path in auto_paths]
         self.auto_bold_font_paths = [
             str(path) for path in auto_paths if "bold" in path.name.lower()
+        ]
+        self.auto_emoji_font_paths = [
+            str(DEFAULT_FONT_DIR / name)
+            for name, _url in DEFAULT_EMOJI_FONT_DOWNLOADS
         ]
 
     def _start_font_bootstrap_task(self) -> None:
@@ -242,7 +265,7 @@ class XMonitor(Star):
             return
         missing = [
             (name, url)
-            for name, url in DEFAULT_FONT_DOWNLOADS
+            for name, url in (*DEFAULT_FONT_DOWNLOADS, *DEFAULT_EMOJI_FONT_DOWNLOADS)
             if not (DEFAULT_FONT_DIR / name).exists()
         ]
         if not missing:
@@ -285,8 +308,11 @@ class XMonitor(Star):
             raise ValueError("CHECK_INTERVAL 必须大于 0，单位为分钟")
         return interval_minutes
 
+    def _target_account_name(self) -> str:
+        return str(getattr(self, "target_account", "") or "").strip().lstrip("@")
+
     def _build_search_query(self) -> str:
-        target_account = str(self.target_account or "").strip().lstrip("@")
+        target_account = self._target_account_name()
         if not target_account:
             raise RuntimeError("缺少 TARGET_ACCOUNT")
 
@@ -378,18 +404,43 @@ class XMonitor(Star):
         source_logo = getattr(self, "source_logo", None)
         if source_logo:
             render_options["source_logo"] = source_logo
+        cached_avatar = self._cached_avatar_image_source()
+        if cached_avatar is not None:
+            render_options["avatar"] = cached_avatar
         font_paths = list(getattr(self, "font_paths", []))
         bold_font_paths = list(getattr(self, "bold_font_paths", []))
+        emoji_font_paths = list(getattr(self, "emoji_font_paths", []))
         if getattr(self, "auto_download_fonts", False):
             font_paths.extend(getattr(self, "auto_font_paths", []))
             bold_font_paths.extend(getattr(self, "auto_bold_font_paths", []))
+            emoji_font_paths.extend(getattr(self, "auto_emoji_font_paths", []))
         if font_paths:
             render_options["font_paths"] = font_paths
         if bold_font_paths:
             render_options["bold_font_paths"] = bold_font_paths
+        if emoji_font_paths:
+            render_options["emoji_font_paths"] = emoji_font_paths
         if extra_options:
             render_options.update(extra_options)
         return render_options or None
+
+    def _cached_avatar_image_source(self) -> bytes | None:
+        account = self._target_account_name()
+        history_store = getattr(self, "history_store", None)
+        if not account or history_store is None:
+            return None
+        try:
+            record = history_store.get_user_avatar(account)
+        except Exception as error:
+            logger.error(f"读取 @{account} 头像缓存失败: {error}")
+            return None
+        if record is None or not record.avatar_base64:
+            return None
+        try:
+            return base64.b64decode(record.avatar_base64, validate=True)
+        except (binascii.Error, ValueError) as error:
+            logger.error(f"@{account} 头像缓存 base64 无效: {error}")
+            return None
 
     async def _render_tweet_to_base64(
         self,
@@ -506,6 +557,98 @@ class XMonitor(Star):
             raise RuntimeError(f"TwitterAPI.io advanced_search 返回错误: {message}")
         return data
 
+    async def _ensure_target_avatar_cached(self, client: httpx.AsyncClient) -> None:
+        account = self._target_account_name()
+        if not account:
+            return
+        try:
+            existing = self.history_store.get_user_avatar(account)
+            if existing is not None and existing.avatar_base64:
+                return
+
+            profile_picture_url = await self._fetch_profile_picture_url(
+                client,
+                account,
+            )
+            if not profile_picture_url:
+                logger.warning(f"@{account} 用户资料中没有 profilePicture，跳过头像缓存。")
+                return
+
+            avatar_bytes = await self._download_avatar_bytes(profile_picture_url)
+            avatar_base64 = base64.b64encode(avatar_bytes).decode("ascii")
+            self.history_store.save_user_avatar(
+                account,
+                profile_picture_url=profile_picture_url,
+                avatar_base64=avatar_base64,
+            )
+            logger.info(f"@{account} 用户头像已缓存到本地数据库。")
+        except Exception as error:
+            logger.error(f"@{account} 用户头像缓存失败，继续获取推文: {error}")
+
+    async def _fetch_profile_picture_url(
+        self,
+        client: httpx.AsyncClient,
+        account: str,
+    ) -> str | None:
+        response = await client.get(
+            self.TWITTER_USER_INFO_URL,
+            headers={"X-API-Key": self.api_key},
+            params={"userName": account},
+        )
+        response.raise_for_status()
+        data = response.json()
+        if isinstance(data, dict) and data.get("status") == "error":
+            message = data.get("message") or data.get("msg") or "unknown error"
+            raise RuntimeError(f"TwitterAPI.io user/info 返回错误: {message}")
+        return self._extract_profile_picture_url(data)
+
+    @staticmethod
+    def _extract_profile_picture_url(data) -> str | None:
+        if not isinstance(data, dict):
+            return None
+        containers = [data]
+        for key in ("data", "user", "userInfo"):
+            value = data.get(key)
+            if isinstance(value, dict):
+                containers.append(value)
+        for container in containers:
+            for key in (
+                "profilePicture",
+                "profile_picture",
+                "profileImageUrl",
+                "profile_image_url",
+                "profile_image_url_https",
+                "avatar",
+            ):
+                value = container.get(key)
+                if value:
+                    return str(value)
+        return None
+
+    async def _download_avatar_bytes(self, profile_picture_url: str) -> bytes:
+        if not self._is_valid_avatar_url(profile_picture_url):
+            raise ValueError("profilePicture 不是有效的 http(s) URL")
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            response = await client.get(profile_picture_url)
+            response.raise_for_status()
+            content = bytes(response.content)
+        if not content:
+            raise RuntimeError("头像下载结果为空")
+        if len(content) > 5 * 1024 * 1024:
+            raise RuntimeError("头像文件超过 5 MiB，拒绝写入数据库")
+        return content
+
+    @staticmethod
+    def _is_valid_avatar_url(profile_picture_url: str) -> bool:
+        parsed = urlparse(str(profile_picture_url))
+        host = (parsed.hostname or "").strip().lower()
+        return (
+            parsed.scheme in {"http", "https"}
+            and bool(host)
+            and host != "localhost"
+            and not host.endswith(".localhost")
+        )
+
     async def _fetch_new_tweets(self):
         """从 TwitterAPI.io 获取最近 CHECK_INTERVAL 分钟内的推文。"""
         if not self.api_key:
@@ -517,6 +660,7 @@ class XMonitor(Star):
         next_cursor = None
 
         async with httpx.AsyncClient(timeout=30) as client:
+            await self._ensure_target_avatar_cached(client)
             while True:
                 data = await self._fetch_tweet_search_window(client, next_cursor)
                 tweets.extend(

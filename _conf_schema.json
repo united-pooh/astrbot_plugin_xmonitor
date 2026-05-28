@@ -42,5 +42,10 @@
     "description": "自定义粗体字体路径列表；不填时会回退到 FONT_PATHS 或默认字体",
     "type": "list",
     "default": []
+  },
+  "EMOJI_FONT_PATHS": {
+    "description": "自定义 emoji 字体路径列表；Docker 内建议挂载 NotoColorEmoji.ttf 或 Twemoji 彩色字体",
+    "type": "list",
+    "default": []
   }
 }

@@ -33,12 +33,14 @@ class WithinTimeQueryTest(unittest.TestCase):
             + methods["_validate_check_interval_minutes"],
             namespace,
         )
+        exec(methods["_target_account_name"], namespace)
         exec(methods["_build_search_query"], namespace)
 
         class Probe:
             _validate_check_interval_minutes = staticmethod(
                 namespace["_validate_check_interval_minutes"]
             )
+            _target_account_name = namespace["_target_account_name"]
             _build_search_query = namespace["_build_search_query"]
 
         probe = Probe()
@@ -130,6 +132,7 @@ class FetchPathTest(unittest.IsolatedAsyncioTestCase):
         }
         for method_name in (
             "_validate_check_interval_minutes",
+            "_target_account_name",
             "_build_search_query",
             "_extract_tweet_id",
             "_parse_tweet_datetime",
@@ -151,10 +154,14 @@ class FetchPathTest(unittest.IsolatedAsyncioTestCase):
             )
             _extract_tweet_id = staticmethod(namespace["_extract_tweet_id"])
             _parse_tweet_datetime = staticmethod(namespace["_parse_tweet_datetime"])
+            _target_account_name = namespace["_target_account_name"]
             _build_search_query = namespace["_build_search_query"]
             _dedupe_tweets = namespace["_dedupe_tweets"]
             _fetch_tweet_search_window = namespace["_fetch_tweet_search_window"]
             _fetch_new_tweets = namespace["_fetch_new_tweets"]
+
+            async def _ensure_target_avatar_cached(self, client):
+                self.avatar_cache_client = client
 
         return Probe
 
@@ -264,6 +271,7 @@ class FetchPathTest(unittest.IsolatedAsyncioTestCase):
         tweets = await probe._fetch_new_tweets()
 
         self.assertEqual([tweet["id"] for tweet in tweets], ["1", "2"])
+        self.assertIsInstance(probe.avatar_cache_client, Client)
 
     async def test_fetch_new_tweets_requires_api_key(self) -> None:
         Probe = self._build_probe_class()

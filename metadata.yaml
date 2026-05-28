@@ -1,6 +1,6 @@
 name: astrbot_plugin_xmonitor # 插件唯一识别名，以 astrbot_plugin_ 前缀开头
 display_name: 推特观察者 # 用于展示的名字，可以是方便人类阅读的名字（需要版本 >= v4.5.0，低版本不会报错，请放心填写）
-desc: 监控指定 X/Twitter 账号，保存历史推文，并用 Pillow 渲染原文或翻译图片推送到订阅群。 # 插件简短描述
-version: v1.0.0 # 插件版本号。格式：v1.1.1 或者 v1.1
+desc: 监控指定 X/Twitter 账号，缓存头像和历史推文，并用 Pillow 渲染原文或翻译图片推送到订阅群。 # 插件简短描述
+version: v1.0.1 # 插件版本号。格式：v1.1.1 或者 v1.1
 author: united_pooh # 作者
 repo: https://github.com/united-pooh/astrbot_plugin_xmonitor # 插件的仓库地址

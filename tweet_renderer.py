@@ -321,7 +321,18 @@ def _load_emoji_font(size: int, options: dict[str, Any]) -> Font | None:
             "/Library/Fonts/Arial Unicode.ttf",
         ]
     )
-    candidate_sizes = [size, max(size + 1, round(size * 1.18)), 40, 48, 64, 96, 160]
+    candidate_sizes = [
+        size,
+        max(size + 1, round(size * 1.18)),
+        40,
+        48,
+        64,
+        96,
+        109,
+        128,
+        136,
+        160,
+    ]
     for source in emoji_font_paths:
         path = str(source)
         if not path or not Path(path).exists():

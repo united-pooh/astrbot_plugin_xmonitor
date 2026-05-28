@@ -87,6 +87,29 @@ class TweetHistoryStoreTest(unittest.TestCase):
             with self.assertRaises(TweetHistoryLookupCollision):
                 store.get_by_short_id(first.short_id)
 
+    def test_user_avatar_cache_normalizes_account_and_updates_base64(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            store = self._store(tmp_dir)
+
+            first = store.save_user_avatar(
+                "@Blue_ArchiveJP",
+                profile_picture_url="https://pbs.twimg.com/profile_images/a.jpg",
+                avatar_base64="Zmlyc3Q=",
+            )
+            second = store.save_user_avatar(
+                "Blue_ArchiveJP",
+                profile_picture_url="https://pbs.twimg.com/profile_images/b.jpg",
+                avatar_base64="c2Vjb25k",
+            )
+
+            self.assertEqual(first.account, "Blue_ArchiveJP")
+            self.assertEqual(second.account, "Blue_ArchiveJP")
+            cached = store.get_user_avatar("@blue_archivejp")
+            self.assertIsNotNone(cached)
+            assert cached is not None
+            self.assertEqual(cached.profile_picture_url, "https://pbs.twimg.com/profile_images/b.jpg")
+            self.assertEqual(cached.avatar_base64, "c2Vjb25k")
+
 
 if __name__ == "__main__":
     unittest.main()
