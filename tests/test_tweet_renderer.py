@@ -113,6 +113,10 @@ def _glyph_signature(
     return bbox, image.crop(bbox).tobytes()
 
 
+def _noto_color_emoji_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "data" / "fonts" / "NotoColorEmoji.ttf"
+
+
 class TweetRendererTest(unittest.TestCase):
     def test_default_layout_parameters_match_x_detail_dom(self) -> None:
         self.assertEqual(tweet_renderer.DEFAULT_WIDTH, 1200)
@@ -496,6 +500,7 @@ class TweetRendererTest(unittest.TestCase):
             body_font,
             line_height,
             emoji_font=emoji_font,
+            target_image=image,
         )
 
         emoji_bbox = _pixel_bbox(
@@ -507,6 +512,115 @@ class TweetRendererTest(unittest.TestCase):
         emoji_center_y = (emoji_bbox[1] + emoji_bbox[3]) / 2
         line_center_y = line_top + (line_height / 2)
         self.assertLessEqual(abs(emoji_center_y - line_center_y), 3)
+
+    def test_noto_color_emoji_is_scaled_inside_text_line(self) -> None:
+        emoji_path = _noto_color_emoji_path()
+        if not emoji_path.exists():
+            self.skipTest("Noto Color Emoji fixture is not available")
+
+        fonts = tweet_renderer._load_fonts({"emoji_font_paths": [str(emoji_path)]})
+        emoji_font = fonts.get("emoji")
+        self.assertIsNotNone(emoji_font)
+        body_font = fonts["body"]
+        line_top = 20
+        line_height = tweet_renderer._line_height(
+            body_font,
+            tweet_renderer.DEFAULT_BODY_LINE_PADDING,
+        )
+
+        for emoji in ("😀", "🥰", "❤️", "☕", "🧑‍💻", "🇯🇵", "👍🏻", "1️⃣"):
+            image = Image.new("RGBA", (360, 140), (255, 255, 255, 255))
+            draw = ImageDraw.Draw(image)
+
+            tweet_renderer._draw_rich_lines(
+                draw,
+                [[tweet_renderer.TextSegment(emoji)]],
+                (20, line_top),
+                body_font,
+                line_height,
+                emoji_font=emoji_font,
+                target_image=image,
+            )
+
+            bbox = _pixel_bbox(
+                image,
+                lambda pixel: pixel[:3] != (255, 255, 255),
+            )
+            self.assertIsNotNone(bbox, emoji)
+            assert bbox is not None
+            self.assertGreater(bbox[3] - bbox[1], 10, emoji)
+            self.assertGreaterEqual(bbox[1], line_top, emoji)
+            self.assertLessEqual(bbox[3], line_top + line_height, emoji)
+            emoji_center_y = (bbox[1] + bbox[3]) / 2
+            line_center_y = line_top + (line_height / 2)
+            self.assertLessEqual(abs(emoji_center_y - line_center_y), 3, emoji)
+
+    def test_emoji_advance_matches_single_cjk_text_cell(self) -> None:
+        emoji_path = _noto_color_emoji_path()
+        if not emoji_path.exists():
+            self.skipTest("Noto Color Emoji fixture is not available")
+
+        fonts = tweet_renderer._load_fonts({"emoji_font_paths": [str(emoji_path)]})
+        body_font = fonts["body"]
+        emoji_font = fonts.get("emoji")
+        self.assertIsNotNone(emoji_font)
+        line_height = tweet_renderer._line_height(
+            body_font,
+            tweet_renderer.DEFAULT_BODY_LINE_PADDING,
+        )
+        image = Image.new("RGBA", (500, 120), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+        cell_width = draw.textlength("国", font=body_font)
+
+        for emoji in ("😀", "🥰", "❤️", "☕", "🧑‍💻", "🇯🇵", "👍🏻", "1️⃣"):
+            width = tweet_renderer._textlength(
+                draw,
+                emoji,
+                body_font,
+                emoji_font,
+                line_height,
+            )
+            self.assertAlmostEqual(width, cell_width, delta=1, msg=emoji)
+
+        mixed_width = tweet_renderer._textlength(
+            draw,
+            "A😀B",
+            body_font,
+            emoji_font,
+            line_height,
+        )
+        expected_width = (
+            draw.textlength("A", font=body_font)
+            + cell_width
+            + draw.textlength("B", font=body_font)
+        )
+        self.assertAlmostEqual(mixed_width, expected_width, delta=1)
+
+    def test_scaled_emoji_width_is_used_for_wrapping(self) -> None:
+        emoji_path = _noto_color_emoji_path()
+        if not emoji_path.exists():
+            self.skipTest("Noto Color Emoji fixture is not available")
+
+        fonts = tweet_renderer._load_fonts({"emoji_font_paths": [str(emoji_path)]})
+        body_font = fonts["body"]
+        emoji_font = fonts.get("emoji")
+        line_height = tweet_renderer._line_height(
+            body_font,
+            tweet_renderer.DEFAULT_BODY_LINE_PADDING,
+        )
+        image = Image.new("RGBA", (500, 120), (255, 255, 255, 255))
+        draw = ImageDraw.Draw(image)
+
+        lines = tweet_renderer._wrap_segments(
+            draw,
+            [tweet_renderer.TextSegment("😀" * 8)],
+            body_font,
+            500,
+            emoji_font=emoji_font,
+            line_height=line_height,
+        )
+
+        self.assertEqual(len(lines), 1)
 
     def test_media_override_spans_almost_full_card_width_from_margin(self) -> None:
         image = render_image(

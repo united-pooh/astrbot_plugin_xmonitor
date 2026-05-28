@@ -105,6 +105,7 @@ class FakeHistoryStore:
             tweet=tweet,
             created_at=tweet.get("createdAt"),
             stored_at="2024-05-01T09:02:00+08:00",
+            account=account,
         )
         self.records.insert(0, record)
         return record
@@ -147,12 +148,14 @@ class FakeHistoryRecord:
         tweet,
         created_at=None,
         stored_at="2024-05-01T09:02:00+08:00",
+        account=None,
     ) -> None:
         self.short_id = short_id
         self.original_text = original_text
         self.tweet = tweet
         self.created_at = created_at
         self.stored_at = stored_at
+        self.account = account
 
 
 class FakeAvatarRecord:
@@ -258,6 +261,8 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         "_summarize_history_text",
         "_build_history_list_message",
         "_render_history_record_to_base64",
+        "_history_record_account",
+        "_ensure_history_record_avatar_cached",
         "get_latest_tweet_command",
         "get_history_command",
         "render_history_tweet_command",
@@ -319,6 +324,10 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         _build_history_list_message = _unwrap(namespace["_build_history_list_message"])
         _render_history_record_to_base64 = _unwrap(
             namespace["_render_history_record_to_base64"]
+        )
+        _history_record_account = _unwrap(namespace["_history_record_account"])
+        _ensure_history_record_avatar_cached = _unwrap(
+            namespace["_ensure_history_record_avatar_cached"]
         )
         get_latest_tweet_command = _unwrap(namespace["get_latest_tweet_command"])
         get_history_command = _unwrap(namespace["get_history_command"])
@@ -719,6 +728,90 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
             [("base64_image", "png-1")],
         )
         self.assertEqual(captured, [(record.tweet, {"source_logo": "/tmp/source-logo.png"})])
+
+    async def test_x_command_uses_cached_history_account_avatar(self) -> None:
+        captured = []
+
+        def render(tweet, options=None):
+            captured.append((tweet, options))
+            return f"png-{tweet['id']}"
+
+        Probe, _StarTools, _logger = _build_probe(render)
+        record = FakeHistoryRecord(
+            short_id="114514",
+            original_text="original tweet",
+            tweet=_tweet("1", "original tweet"),
+            account="@Blue_ArchiveJP",
+        )
+        probe = Probe()
+        probe.source_logo = None
+        probe.history_store = FakeHistoryStore([record])
+        probe.history_store.avatar_records["blue_archivejp"] = FakeAvatarRecord(
+            account="Blue_ArchiveJP",
+            profile_picture_url="https://pbs.twimg.com/profile_images/avatar.jpg",
+            avatar_base64=base64.b64encode(b"avatar-bytes").decode("ascii"),
+        )
+
+        results = await _collect_async(
+            probe.render_history_tweet_command(FakeEvent("/x 114514"))
+        )
+
+        self.assertEqual(results[0].operations, [("base64_image", "png-1")])
+        self.assertEqual(captured, [(record.tweet, {"avatar": b"avatar-bytes"})])
+        self.assertEqual(probe.history_store.avatar_saves, [])
+
+    async def test_x_command_fetches_missing_history_account_avatar_before_render(
+        self,
+    ) -> None:
+        captured = []
+
+        def render(tweet, options=None):
+            captured.append((tweet, options))
+            return f"png-{tweet['id']}"
+
+        Probe, _StarTools, _logger = _build_probe(render)
+        record = FakeHistoryRecord(
+            short_id="114514",
+            original_text="original tweet",
+            tweet=_tweet("1", "original tweet"),
+            account="Blue_ArchiveJP",
+        )
+        probe = Probe()
+        probe.api_key = "secret"
+        probe.source_logo = None
+        probe.history_store = FakeHistoryStore([record])
+        fetched_accounts = []
+        downloaded_urls = []
+
+        async def fetch_profile_picture_url(client, account):
+            fetched_accounts.append(account)
+            return "https://pbs.twimg.com/profile_images/avatar.jpg"
+
+        async def download_avatar_bytes(profile_picture_url):
+            downloaded_urls.append(profile_picture_url)
+            return b"avatar-bytes"
+
+        probe._fetch_profile_picture_url = fetch_profile_picture_url
+        probe._download_avatar_bytes = download_avatar_bytes
+
+        results = await _collect_async(
+            probe.render_history_tweet_command(FakeEvent("/x 114514"))
+        )
+
+        self.assertEqual(results[0].operations, [("base64_image", "png-1")])
+        self.assertEqual(fetched_accounts, ["Blue_ArchiveJP"])
+        self.assertEqual(
+            downloaded_urls,
+            ["https://pbs.twimg.com/profile_images/avatar.jpg"],
+        )
+        self.assertEqual(len(probe.history_store.avatar_saves), 1)
+        saved = probe.history_store.avatar_saves[0]
+        self.assertEqual(saved.account, "Blue_ArchiveJP")
+        self.assertEqual(
+            saved.avatar_base64,
+            base64.b64encode(b"avatar-bytes").decode("ascii"),
+        )
+        self.assertEqual(captured, [(record.tweet, {"avatar": b"avatar-bytes"})])
 
     async def test_x_command_renders_translation_with_original_assets(self) -> None:
         captured = []

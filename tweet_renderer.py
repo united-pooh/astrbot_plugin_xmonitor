@@ -48,6 +48,10 @@ DEFAULT_ACTION_ICON_GAP = 18
 DEFAULT_ACTION_ICON_TOP_OFFSET = 4
 DEFAULT_VERIFIED_BADGE_SIZE = 26
 DEFAULT_BADGE_GAP = 6
+DEFAULT_EMOJI_LINE_PADDING = 6
+EMOJI_VARIATION_SELECTORS = {0xFE0E, 0xFE0F}
+EMOJI_MODIFIER_RANGE = range(0x1F3FB, 0x1F400)
+REGIONAL_INDICATOR_RANGE = range(0x1F1E6, 0x1F200)
 GOLD = (226, 183, 25)
 DARK_BADGE = (15, 20, 25)
 TEXT_GLYPH_COMPATIBILITY_MAP = str.maketrans(
@@ -97,17 +101,18 @@ def render_image(
     source_logo_position = _source_logo_position(options)
     body_tweet = _tweet_for_body_text(tweet, options)
     text_segments = _parse_rich_text(body_tweet)
+    line_height = _line_height(
+        fonts["body"], int(options.get("body_line_padding", DEFAULT_BODY_LINE_PADDING))
+    )
     text_lines = _wrap_segments(
         draw,
         text_segments,
         fonts["body"],
         main_width,
         emoji_font=fonts.get("emoji"),
+        line_height=line_height,
     )
 
-    line_height = _line_height(
-        fonts["body"], int(options.get("body_line_padding", DEFAULT_BODY_LINE_PADDING))
-    )
     text_height = max(1, len(text_lines)) * line_height
     footer_height = _line_height(fonts["footer"], 8)
     source_logo_size: tuple[int, int] | None = None
@@ -176,6 +181,7 @@ def render_image(
         fonts["body"],
         line_height,
         emoji_font=fonts.get("emoji"),
+        target_image=image,
     )
 
     if (
@@ -314,6 +320,12 @@ def _load_emoji_font(size: int, options: dict[str, Any]) -> Font | None:
     emoji_font_paths = list(options.get("emoji_font_paths") or [])
     emoji_font_paths.extend(
         [
+            str(
+                Path(__file__).resolve().parent
+                / "data"
+                / "fonts"
+                / "NotoColorEmoji.ttf"
+            ),
             "/System/Library/Fonts/Apple Color Emoji.ttc",
             "/System/Library/Fonts/Apple Symbols.ttf",
             "/System/Library/Fonts/CJKSymbolsFallback.ttc",
@@ -607,6 +619,7 @@ def _draw_rich_lines(
     line_height: int,
     *,
     emoji_font: Font | None = None,
+    target_image: Image.Image | None = None,
 ) -> None:
     x0, y = xy
     for line in lines:
@@ -628,13 +641,15 @@ def _draw_rich_lines(
                     embedded_color=embedded_color,
                 )
                 if embedded_color:
-                    draw.text(
-                        (x, run_baseline_y),
+                    text_width = _draw_color_emoji_run(
+                        target_image,
+                        draw,
                         run_text,
-                        font=run_font,
-                        fill=segment.fill,
-                        anchor="ls",
-                        embedded_color=True,
+                        run_font,
+                        font,
+                        x,
+                        y,
+                        line_height,
                     )
                 else:
                     draw.text(
@@ -643,8 +658,8 @@ def _draw_rich_lines(
                         font=run_font,
                         fill=segment.fill,
                         anchor="ls",
-                )
-                text_width = draw.textlength(run_text, font=run_font)
+                    )
+                    text_width = draw.textlength(run_text, font=run_font)
                 if segment.underline and run_text:
                     underline_y = min(y + line_height - 2, run_baseline_y + 3)
                     draw.line(
@@ -682,6 +697,180 @@ def _inline_run_baseline_y(
     glyph_center_offset = (bbox[1] + bbox[3]) / 2
     line_center_y = line_top + (line_height / 2)
     return round(line_center_y - glyph_center_offset)
+
+
+def _draw_color_emoji_run(
+    target_image: Image.Image | None,
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    emoji_font: Font,
+    body_font: Font,
+    x: float,
+    line_top: int,
+    line_height: int,
+) -> float:
+    cell_width = _emoji_cell_width(draw, body_font, line_height)
+    clusters = _split_emoji_clusters(text)
+    if not clusters:
+        return 0.0
+
+    if target_image is None:
+        baseline_y = _inline_run_baseline_y(
+            draw,
+            text,
+            emoji_font,
+            line_top,
+            line_height,
+            _line_baseline(emoji_font, line_top, line_height),
+            embedded_color=True,
+        )
+        draw.text(
+            (x, baseline_y),
+            text,
+            font=emoji_font,
+            fill=BLACK,
+            anchor="ls",
+            embedded_color=True,
+        )
+        return _emoji_run_width(draw, text, emoji_font, line_height, cell_width)
+
+    cursor_x = x
+    for cluster in clusters:
+        emoji_image = _render_emoji_run_image(
+            draw,
+            cluster,
+            emoji_font,
+            line_height,
+            max_width=cell_width,
+        )
+        if emoji_image is None:
+            baseline_y = _inline_run_baseline_y(
+                draw,
+                cluster,
+                emoji_font,
+                line_top,
+                line_height,
+                _line_baseline(emoji_font, line_top, line_height),
+                embedded_color=True,
+            )
+            draw.text(
+                (cursor_x, baseline_y),
+                cluster,
+                font=emoji_font,
+                fill=BLACK,
+                anchor="ls",
+                embedded_color=True,
+            )
+        else:
+            left = round(cursor_x + ((cell_width - emoji_image.width) / 2))
+            top = round(line_top + ((line_height - emoji_image.height) / 2))
+            target_image.paste(emoji_image, (left, top), emoji_image)
+        cursor_x += cell_width
+    return cell_width * len(clusters)
+
+
+def _render_emoji_run_image(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: Font,
+    line_height: int,
+    *,
+    max_width: float | None = None,
+) -> Image.Image | None:
+    bbox = _emoji_text_bbox(draw, text, font)
+    if bbox is None:
+        return None
+
+    natural_width = max(1, bbox[2] - bbox[0])
+    natural_height = max(1, bbox[3] - bbox[1])
+    padding = 2
+    image = Image.new(
+        "RGBA",
+        (natural_width + (padding * 2), natural_height + (padding * 2)),
+        (255, 255, 255, 0),
+    )
+    emoji_draw = ImageDraw.Draw(image)
+    emoji_draw.text(
+        (padding - bbox[0], padding - bbox[1]),
+        text,
+        font=font,
+        fill=BLACK,
+        anchor="ls",
+        embedded_color=True,
+    )
+    alpha_bbox = image.getbbox()
+    if alpha_bbox is None:
+        return None
+    image = image.crop(alpha_bbox)
+
+    max_height = _emoji_max_height(line_height)
+    scale = min(1.0, max_height / image.height)
+    if max_width is not None and max_width > 0:
+        scale = min(scale, max_width / image.width)
+    if scale >= 1.0:
+        return image
+
+    scaled_size = (
+        max(1, round(image.width * scale)),
+        max(1, round(image.height * scale)),
+    )
+    return image.resize(scaled_size, Image.Resampling.LANCZOS)
+
+
+def _emoji_run_width(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: Font,
+    line_height: int,
+    cell_width: float | None = None,
+) -> float:
+    if cell_width is not None:
+        return cell_width * len(_split_emoji_clusters(text))
+    bbox = _emoji_text_bbox(draw, text, font)
+    if bbox is None:
+        return draw.textlength(text, font=font)
+    natural_width = max(1, bbox[2] - bbox[0])
+    natural_height = max(1, bbox[3] - bbox[1])
+    max_height = _emoji_max_height(line_height)
+    if natural_height <= max_height:
+        return float(natural_width)
+    return float(max(1, round(natural_width * (max_height / natural_height))))
+
+
+def _emoji_text_bbox(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: Font,
+) -> tuple[int, int, int, int] | None:
+    try:
+        return draw.textbbox(
+            (0, 0),
+            text,
+            font=font,
+            anchor="ls",
+            embedded_color=True,
+        )
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _emoji_max_height(line_height: int) -> int:
+    return max(1, line_height - DEFAULT_EMOJI_LINE_PADDING)
+
+
+def _emoji_cell_width(
+    draw: ImageDraw.ImageDraw,
+    font: Font,
+    line_height: int,
+) -> float:
+    for sample in ("国", "漢", "あ"):
+        try:
+            width = draw.textlength(sample, font=font)
+        except (OSError, TypeError, ValueError):
+            continue
+        if width > 0:
+            return float(width)
+    return float(_emoji_max_height(line_height))
 
 
 def _draw_footer(
@@ -885,6 +1074,7 @@ def _wrap_segments(
     max_width: int,
     *,
     emoji_font: Font | None = None,
+    line_height: int | None = None,
 ) -> list[list[TextSegment]]:
     lines: list[list[TextSegment]] = []
     current: list[TextSegment] = []
@@ -910,7 +1100,7 @@ def _wrap_segments(
             piece_segment = TextSegment(
                 piece, segment.kind, segment.fill, segment.underline
             )
-            piece_width = _textlength(draw, piece, font, emoji_font)
+            piece_width = _textlength(draw, piece, font, emoji_font, line_height)
             if current and current_width + piece_width > max_width:
                 flush()
                 if piece.isspace():
@@ -927,8 +1117,15 @@ def _wrap_segments(
                 font,
                 max_width,
                 emoji_font,
+                line_height,
             ):
-                char_width = _textlength(draw, char_segment.text, font, emoji_font)
+                char_width = _textlength(
+                    draw,
+                    char_segment.text,
+                    font,
+                    emoji_font,
+                    line_height,
+                )
                 if current and current_width + char_width > max_width:
                     flush()
                 current.append(char_segment)
@@ -954,16 +1151,20 @@ def _break_long_piece(
     font: Font,
     max_width: int,
     emoji_font: Font | None = None,
+    line_height: int | None = None,
 ) -> list[TextSegment]:
     pieces: list[TextSegment] = []
     current = ""
-    for char in segment.text:
-        candidate = current + char
-        if current and _textlength(draw, candidate, font, emoji_font) > max_width:
+    for unit in _split_text_units(segment.text):
+        candidate = current + unit
+        if (
+            current
+            and _textlength(draw, candidate, font, emoji_font, line_height) > max_width
+        ):
             pieces.append(
                 TextSegment(current, segment.kind, segment.fill, segment.underline)
             )
-            current = char
+            current = unit
         else:
             current = candidate
     if current:
@@ -978,10 +1179,26 @@ def _textlength(
     text: str,
     font: Font,
     emoji_font: Font | None = None,
+    line_height: int | None = None,
 ) -> float:
+    resolved_line_height = line_height or _line_height(
+        font,
+        DEFAULT_BODY_LINE_PADDING,
+    )
+    emoji_cell_width = _emoji_cell_width(draw, font, resolved_line_height)
     return sum(
-        draw.textlength(run_text, font=run_font)
-        for run_text, run_font, _embedded_color in _iter_font_runs(
+        (
+            _emoji_run_width(
+                draw,
+                run_text,
+                run_font,
+                resolved_line_height,
+                emoji_cell_width,
+            )
+            if embedded_color
+            else draw.textlength(run_text, font=run_font)
+        )
+        for run_text, run_font, embedded_color in _iter_font_runs(
             text,
             font,
             emoji_font,
@@ -1000,15 +1217,15 @@ def _iter_font_runs(
     runs: list[tuple[str, Font, bool]] = []
     current = ""
     current_is_emoji = False
-    for char in text:
-        is_emoji = _is_emoji_char(char)
+    for unit in _split_text_units(text):
+        is_emoji = _is_emoji_unit(unit)
         if current and is_emoji != current_is_emoji:
             runs.append(
                 (current, emoji_font if current_is_emoji else font, current_is_emoji)
             )
-            current = char
+            current = unit
         else:
-            current += char
+            current += unit
         current_is_emoji = is_emoji
 
     if current:
@@ -1016,12 +1233,104 @@ def _iter_font_runs(
     return runs
 
 
+def _split_text_units(text: str) -> list[str]:
+    units: list[str] = []
+    index = 0
+    while index < len(text):
+        keycap_cluster, next_index = _read_keycap_cluster(text, index)
+        if keycap_cluster is not None:
+            units.append(keycap_cluster)
+            index = next_index
+            continue
+
+        char = text[index]
+        if not _is_emoji_char(char):
+            units.append(char)
+            index += 1
+            continue
+
+        cluster, index = _read_emoji_cluster(text, index)
+        units.append(cluster)
+    return units
+
+
+def _split_emoji_clusters(text: str) -> list[str]:
+    clusters: list[str] = []
+    index = 0
+    while index < len(text):
+        keycap_cluster, next_index = _read_keycap_cluster(text, index)
+        if keycap_cluster is not None:
+            clusters.append(keycap_cluster)
+            index = next_index
+            continue
+
+        cluster, index = _read_emoji_cluster(text, index)
+        if cluster:
+            clusters.append(cluster)
+    return clusters
+
+
+def _read_keycap_cluster(text: str, start: int) -> tuple[str | None, int]:
+    if text[start] not in "#*0123456789":
+        return None, start
+
+    index = start + 1
+    if index < len(text) and ord(text[index]) in EMOJI_VARIATION_SELECTORS:
+        index += 1
+    if index < len(text) and ord(text[index]) == 0x20E3:
+        return text[start : index + 1], index + 1
+    return None, start
+
+
+def _read_emoji_cluster(text: str, start: int) -> tuple[str, int]:
+    index = start + 1
+    if _is_regional_indicator(text[start]):
+        if index < len(text) and _is_regional_indicator(text[index]):
+            index += 1
+        return text[start:index], index
+
+    while index < len(text):
+        char = text[index]
+        if _is_emoji_combining_mark(char):
+            index += 1
+            continue
+        if char == "\u200d" and index + 1 < len(text):
+            index += 2
+            continue
+        break
+    return text[start:index], index
+
+
+def _is_emoji_combining_mark(char: str) -> bool:
+    codepoint = ord(char)
+    return (
+        codepoint in EMOJI_VARIATION_SELECTORS
+        or codepoint in EMOJI_MODIFIER_RANGE
+        or codepoint == 0x20E3
+        or 0xE0020 <= codepoint <= 0xE007F
+    )
+
+
+def _is_regional_indicator(char: str) -> bool:
+    return ord(char) in REGIONAL_INDICATOR_RANGE
+
+
+def _is_emoji_unit(text: str) -> bool:
+    if not text:
+        return False
+    keycap_cluster, _next_index = _read_keycap_cluster(text, 0)
+    return keycap_cluster == text or _is_emoji_char(text[0])
+
+
 def _is_emoji_char(char: str) -> bool:
     codepoint = ord(char)
     return (
         0x1F000 <= codepoint <= 0x1FAFF
         or 0x2600 <= codepoint <= 0x27BF
-        or codepoint in {0x200D, 0xFE0E, 0xFE0F}
+        or codepoint == 0x200D
+        or codepoint in EMOJI_VARIATION_SELECTORS
+        or codepoint == 0x20E3
+        or 0xE0020 <= codepoint <= 0xE007F
     )
 
 

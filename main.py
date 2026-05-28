@@ -399,12 +399,17 @@ class XMonitor(Star):
             chain = chain.at(str(self.notify_user), self.notify_user)
         return chain.base64_image(image_base64)
 
-    def _build_render_options(self, extra_options: dict | None = None) -> dict | None:
+    def _build_render_options(
+        self,
+        extra_options: dict | None = None,
+        *,
+        avatar_account: str | None = None,
+    ) -> dict | None:
         render_options = {}
         source_logo = getattr(self, "source_logo", None)
         if source_logo:
             render_options["source_logo"] = source_logo
-        cached_avatar = self._cached_avatar_image_source()
+        cached_avatar = self._cached_avatar_image_source(avatar_account)
         if cached_avatar is not None:
             render_options["avatar"] = cached_avatar
         font_paths = list(getattr(self, "font_paths", []))
@@ -424,8 +429,8 @@ class XMonitor(Star):
             render_options.update(extra_options)
         return render_options or None
 
-    def _cached_avatar_image_source(self) -> bytes | None:
-        account = self._target_account_name()
+    def _cached_avatar_image_source(self, account: str | None = None) -> bytes | None:
+        account = str(account or self._target_account_name()).strip().lstrip("@")
         history_store = getattr(self, "history_store", None)
         if not account or history_store is None:
             return None
@@ -446,12 +451,14 @@ class XMonitor(Star):
         self,
         tweet: dict,
         extra_options: dict | None = None,
+        *,
+        avatar_account: str | None = None,
     ) -> str:
         await self._wait_for_font_bootstrap()
         return await asyncio.to_thread(
             render_to_base64,
             tweet,
-            self._build_render_options(extra_options),
+            self._build_render_options(extra_options, avatar_account=avatar_account),
         )
 
     async def _send_text_fallback(
@@ -557,8 +564,12 @@ class XMonitor(Star):
             raise RuntimeError(f"TwitterAPI.io advanced_search 返回错误: {message}")
         return data
 
-    async def _ensure_target_avatar_cached(self, client: httpx.AsyncClient) -> None:
-        account = self._target_account_name()
+    async def _ensure_target_avatar_cached(
+        self,
+        client: httpx.AsyncClient,
+        account: str | None = None,
+    ) -> None:
+        account = str(account or self._target_account_name()).strip().lstrip("@")
         if not account:
             return
         try:
@@ -747,7 +758,27 @@ class XMonitor(Star):
                 "text_override": translation_text,
                 "translation_style": True,
             }
-        return await self._render_tweet_to_base64(record.tweet, extra_options)
+        avatar_account = await self._ensure_history_record_avatar_cached(record)
+        return await self._render_tweet_to_base64(
+            record.tweet,
+            extra_options,
+            avatar_account=avatar_account,
+        )
+
+    def _history_record_account(self, record) -> str | None:
+        account = getattr(record, "account", None) or self._target_account_name()
+        account = str(account or "").strip().lstrip("@")
+        return account or None
+
+    async def _ensure_history_record_avatar_cached(self, record) -> str | None:
+        account = self._history_record_account(record)
+        if not account:
+            return None
+        if self._cached_avatar_image_source(account) is not None:
+            return account
+        async with httpx.AsyncClient(timeout=30) as client:
+            await self._ensure_target_avatar_cached(client, account)
+        return account
 
     @filter.command("new", alias={"newx"})
     async def get_latest_tweet_command(self, event: AstrMessageEvent):
