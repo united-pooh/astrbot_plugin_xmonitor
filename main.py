@@ -817,7 +817,13 @@ class XMonitor(Star):
 
             logger.info(f"发现 {len(data)} 条来自 @{self.target_account} 的新推文。")
             self._store_tweets_history(data)
-            await self.notify_subscribers(data)
+            try:
+                await self.notify_subscribers(data)
+            except Exception as notify_error:
+                logger.error(
+                    f"计划任务 'check_for_new_tweets' 通知阶段失败，"
+                    f"已保留历史推文记录: {notify_error}"
+                )
             for tweet in data:
                 created_at = self._format_created_at(tweet)
                 text = self._sanitize_tweet_text(tweet)

@@ -642,6 +642,34 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(probe.history_store.added), 1)
         self.assertEqual(notified, [[_tweet("1", "scheduled tweet")]])
 
+    async def test_scheduled_fetch_keeps_job_alive_when_notify_raises(self) -> None:
+        Probe, _StarTools, logger = _build_probe(lambda tweet, options=None: "png")
+        probe = Probe()
+        probe.target_account = "Blue_ArchiveJP"
+        probe.check_interval_minutes = 10
+        probe.history_store = FakeHistoryStore()
+
+        async def fetch():
+            return [_tweet("1", "scheduled tweet")]
+
+        async def notify(tweets):
+            raise RuntimeError("notify exploded")
+
+        probe._fetch_new_tweets = fetch
+        probe.notify_subscribers = notify
+
+        await probe.check_for_new_tweets()
+
+        self.assertEqual(len(probe.history_store.added), 1)
+        self.assertTrue(
+            any("通知阶段失败" in message for message in logger.errors),
+            logger.errors,
+        )
+        self.assertFalse(
+            any("计划任务 'check_for_new_tweets' 失败" in message for message in logger.errors),
+            logger.errors,
+        )
+
     async def test_history_command_lists_latest_records(self) -> None:
         Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
         first = FakeHistoryRecord(
