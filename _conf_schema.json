@@ -1,0 +1,31 @@
+{
+  "X-API": {
+    "description": "twitterapi.io 上获取的 API key",
+    "type": "string"
+  },
+  "TARGET_ACCOUNT": {
+    "description": "要监控的推特账号，默认为 Blue_ArchiveJP",
+    "type": "string",
+    "default": "Blue_ArchiveJP"
+  },
+  "CHECK_INTERVAL": {
+    "description": "检查间隔和 within_time 查询窗口，单位分钟，默认 10，必须大于 0",
+    "type": "int",
+    "default": 10
+  },
+  "SUBSCRIBE_GROUPS": {
+    "description": "要发送通知的订阅群组列表，默认为空列表",
+    "type": "list",
+    "default": []
+  },
+  "NOTIFY_USER": {
+    "description": "广播时要 @ 的用户 QQ，不填则不 @",
+    "type": "string",
+    "default": ""
+  },
+  "SOURCE_LOGO": {
+    "description": "推文正文下方的一行来源 logo 图片路径，留空则不显示；相对路径按插件目录解析",
+    "type": "string",
+    "default": "assets/source_logo.png"
+  }
+}

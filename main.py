@@ -1,0 +1,537 @@
+import asyncio
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import httpx
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.star import Context, Star, StarTools, register
+from astrbot.core.message.message_event_result import MessageChain
+
+# 导入调度器管理器
+try:
+    from .scheduler import SchedulerManager
+except ImportError:  # pragma: no cover - local script fallback for lightweight probes.
+    from scheduler import SchedulerManager
+
+try:
+    from .tweet_renderer import render_to_base64
+except ImportError:  # pragma: no cover - local script fallback for lightweight probes.
+    from tweet_renderer import render_to_base64
+
+try:
+    from .history_store import TweetHistoryLookupCollision, TweetHistoryStore
+except ImportError:  # pragma: no cover - local script fallback for lightweight probes.
+    from history_store import TweetHistoryLookupCollision, TweetHistoryStore
+
+
+@register("astrbot_plugin_xmonitor", "united_pooh", "一个api调用器", "1.0.0")
+class XMonitor(Star):
+    TWITTER_SEARCH_URL = "https://api.twitterapi.io/twitter/tweet/advanced_search"
+
+    def __init__(self, context: Context, config: AstrBotConfig):
+        super().__init__(context)
+        self.scheduler = SchedulerManager()
+        self.config = config
+        self.job_id = None
+        self.api_key = self.config.get("X-API", "")
+        self.target_account = self.config.get("TARGET_ACCOUNT")
+        self.check_interval_minutes = self._validate_check_interval_minutes(
+            self.config.get("CHECK_INTERVAL")
+        )
+        self.subscribe_groups = self._normalize_subscribe_groups(
+            self.config.get("SUBSCRIBE_GROUPS", [])
+        )
+        self.notify_user = self._normalize_notify_user(
+            self.config.get("NOTIFY_USER", "")
+        )
+        self.source_logo = self._normalize_source_logo(
+            self.config.get("SOURCE_LOGO", "assets/source_logo.png")
+        )
+        self.history_store = TweetHistoryStore(self._history_db_path())
+
+    async def initialize(self):
+        """初始化插件并按分钟间隔调度 Twitter 轮询任务。"""
+        self.api_key = self.config.get("X-API", "")
+        self.target_account = self.config.get("TARGET_ACCOUNT")
+        self.check_interval_minutes = self._validate_check_interval_minutes(
+            self.config.get("CHECK_INTERVAL")
+        )
+        self.subscribe_groups = self._normalize_subscribe_groups(
+            self.config.get("SUBSCRIBE_GROUPS", [])
+        )
+        self.notify_user = self._normalize_notify_user(
+            self.config.get("NOTIFY_USER", "")
+        )
+        self.source_logo = self._normalize_source_logo(
+            self.config.get("SOURCE_LOGO", "assets/source_logo.png")
+        )
+
+        self.job_id = self.scheduler.add_job(
+            self.check_for_new_tweets,
+            "interval",
+            minutes=self.check_interval_minutes,
+            max_instances=1,
+            coalesce=True,
+        )
+        if self.job_id:
+            logger.info(
+                f"成功安排任务 'check_for_new_tweets'，ID为: {self.job_id}，"
+                f"账号: @{self.target_account}，将在插件启动后每 {self.check_interval_minutes} 分钟执行一次"
+            )
+            if self.subscribe_groups:
+                logger.info(
+                    f"定时通知已启用，将向 {len(self.subscribe_groups)} 个群广播更新。"
+                )
+            else:
+                logger.warning(
+                    "SUBSCRIBE_GROUPS 为空，定时任务发现新推文时不会主动推送。"
+                )
+
+    @staticmethod
+    def _normalize_subscribe_groups(raw_value) -> list[str]:
+        """将配置中的订阅群组统一转换为去重后的字符串列表。"""
+        if raw_value is None:
+            return []
+
+        if isinstance(raw_value, str):
+            parts = raw_value.replace("\n", ",").split(",")
+        elif isinstance(raw_value, list):
+            parts = raw_value
+        else:
+            parts = [raw_value]
+
+        groups: list[str] = []
+        seen: set[str] = set()
+        for item in parts:
+            group_id = str(item).strip()
+            if not group_id or group_id in seen:
+                continue
+            seen.add(group_id)
+            groups.append(group_id)
+        return groups
+
+    @staticmethod
+    def _normalize_notify_user(raw_value) -> str | None:
+        """将配置中的通知用户转换为可用于 at 的用户 ID。"""
+        if raw_value is None:
+            return None
+        notify_user = str(raw_value).strip()
+        return notify_user or None
+
+    @staticmethod
+    def _normalize_source_logo(raw_value) -> str | None:
+        """将来源 logo 路径解析为插件目录内的绝对路径。"""
+        if raw_value is None:
+            return None
+        logo_path_text = str(raw_value).strip()
+        if not logo_path_text:
+            return None
+        logo_path = Path(logo_path_text).expanduser()
+        if not logo_path.is_absolute():
+            logo_path = Path(__file__).resolve().parent / logo_path
+        return str(logo_path)
+
+    @staticmethod
+    def _history_db_path() -> Path:
+        return Path(__file__).resolve().parent / "data" / "tweet_history.sqlite3"
+
+    @staticmethod
+    def _validate_check_interval_minutes(raw_value) -> int:
+        interval_minutes = int(raw_value)
+        if interval_minutes <= 0:
+            raise ValueError("CHECK_INTERVAL 必须大于 0，单位为分钟")
+        return interval_minutes
+
+    def _build_search_query(self) -> str:
+        target_account = str(self.target_account or "").strip().lstrip("@")
+        if not target_account:
+            raise RuntimeError("缺少 TARGET_ACCOUNT")
+
+        return (
+            f"from:{target_account} "
+            "include:nativeretweets "
+            f"within_time:{self.check_interval_minutes}m"
+        )
+
+    @staticmethod
+    def _extract_tweet_id(tweet: dict) -> str | None:
+        tweet_id = (
+            tweet.get("id")
+            or tweet.get("tweet_id")
+            or tweet.get("rest_id")
+            or tweet.get("tweetId")
+        )
+        if tweet_id is None:
+            return None
+        return str(tweet_id)
+
+    @staticmethod
+    def _sanitize_tweet_text(tweet: dict) -> str:
+        text = str(tweet.get("text", "")).replace("\n", " ").strip()
+        return " ".join(text.split()) or "(无正文)"
+
+    @staticmethod
+    def _parse_tweet_datetime(tweet: dict) -> datetime | None:
+        raw_value = tweet.get("createdAt")
+        if not raw_value:
+            return None
+
+        if isinstance(raw_value, datetime):
+            parsed = raw_value
+        else:
+            raw_text = str(raw_value).strip()
+            try:
+                parsed = datetime.strptime(raw_text, "%a %b %d %H:%M:%S %z %Y")
+            except ValueError:
+                try:
+                    parsed = datetime.fromisoformat(raw_text.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone(timedelta(hours=8)))
+
+    def _format_created_at(self, tweet: dict) -> str:
+        parsed = self._parse_tweet_datetime(tweet)
+        if parsed is None:
+            return str(tweet.get("createdAt", "unknown time"))
+        return parsed.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _build_tweet_display_lines(
+        self, tweet: dict, *, include_link: bool
+    ) -> list[str]:
+        lines = [
+            self._format_created_at(tweet),
+            self._sanitize_tweet_text(tweet),
+        ]
+        tweet_id = self._extract_tweet_id(tweet)
+        if include_link and tweet_id:
+            lines.append(f"https://x.com/{self.target_account}/status/{tweet_id}")
+        return lines
+
+    def _build_notification_message(self, tweets: list[dict]) -> str:
+        lines = [f"@{self.target_account} 有 {len(tweets)} 条新推文："]
+        for index, tweet in enumerate(tweets):
+            if index > 0:
+                lines.append("")
+            lines.extend(self._build_tweet_display_lines(tweet, include_link=True))
+        return "\n".join(lines)
+
+    def _build_text_message_chain(self, tweets: list[dict]) -> MessageChain:
+        chain = MessageChain()
+        if self.notify_user:
+            chain = chain.at(str(self.notify_user), self.notify_user)
+        return chain.message(self._build_notification_message(tweets))
+
+    def _build_tweet_image_message_chain(self, image_base64: str) -> MessageChain:
+        chain = MessageChain()
+        if self.notify_user:
+            chain = chain.at(str(self.notify_user), self.notify_user)
+        return chain.base64_image(image_base64)
+
+    def _build_render_options(self, extra_options: dict | None = None) -> dict | None:
+        render_options = {}
+        source_logo = getattr(self, "source_logo", None)
+        if source_logo:
+            render_options["source_logo"] = source_logo
+        if extra_options:
+            render_options.update(extra_options)
+        return render_options or None
+
+    async def _render_tweet_to_base64(
+        self,
+        tweet: dict,
+        extra_options: dict | None = None,
+    ) -> str:
+        return await asyncio.to_thread(
+            render_to_base64,
+            tweet,
+            self._build_render_options(extra_options),
+        )
+
+    async def _send_text_fallback(
+        self,
+        group_id: str,
+        tweet: dict,
+        reason: Exception,
+    ) -> None:
+        try:
+            await StarTools.send_message_by_id(
+                type="GroupMessage",
+                id=group_id,
+                message_chain=self._build_text_message_chain([tweet]),
+            )
+            logger.info(
+                f"已向群组 {group_id} 发送 @{self.target_account} 新推文纯文本 fallback"
+            )
+        except Exception as fallback_error:
+            logger.error(
+                f"向群组 {group_id} 发送 @{self.target_account} 纯文本 fallback 失败: "
+                f"{fallback_error}; 原始错误: {reason}"
+            )
+
+    async def notify_subscribers(self, tweets: list[dict]) -> None:
+        """将新推文主动广播给配置中的所有订阅群。"""
+        if not tweets:
+            return
+        if not self.subscribe_groups:
+            logger.warning("未配置 SUBSCRIBE_GROUPS，跳过主动推送。")
+            return
+
+        rendered_tweets: list[tuple[dict, str | None, Exception | None]] = []
+
+        for tweet in tweets:
+            try:
+                rendered_base64 = await self._render_tweet_to_base64(tweet)
+                rendered_tweets.append((tweet, rendered_base64, None))
+            except Exception as error:
+                logger.error(
+                    f"渲染 @{self.target_account} 新推文图片失败，改用纯文本: {error}"
+                )
+                rendered_tweets.append((tweet, None, error))
+
+        for group_id in self.subscribe_groups:
+            for tweet, image_base64, render_exception in rendered_tweets:
+                if render_exception is not None:
+                    await self._send_text_fallback(group_id, tweet, render_exception)
+                    continue
+                if image_base64 is None:
+                    await self._send_text_fallback(
+                        group_id,
+                        tweet,
+                        RuntimeError("推文图片渲染结果为空"),
+                    )
+                    continue
+
+                try:
+                    chain = self._build_tweet_image_message_chain(image_base64)
+                    await StarTools.send_message_by_id(
+                        type="GroupMessage",
+                        id=group_id,
+                        message_chain=chain,
+                    )
+                    logger.info(
+                        f"向群组 {group_id} 推送 @{self.target_account} 新推文图片成功"
+                    )
+                except Exception as send_error:
+                    logger.error(
+                        f"向群组 {group_id} 推送 @{self.target_account} 新推文图片失败: "
+                        f"{send_error}"
+                    )
+                    await self._send_text_fallback(group_id, tweet, send_error)
+
+    def _dedupe_tweets(self, tweets: list[dict], seen_ids: set[str]) -> list[dict]:
+        unique_tweets = []
+        for tweet in tweets:
+            tweet_id = self._extract_tweet_id(tweet)
+            if tweet_id and tweet_id in seen_ids:
+                continue
+            if tweet_id:
+                seen_ids.add(tweet_id)
+            unique_tweets.append(tweet)
+        return unique_tweets
+
+    async def _fetch_tweet_search_window(
+        self,
+        client: httpx.AsyncClient,
+        cursor: str | None = None,
+    ) -> dict:
+        query = self._build_search_query()
+        params = {"query": query, "queryType": "Latest"}
+        if cursor:
+            params["cursor"] = cursor
+        response = await client.get(
+            self.TWITTER_SEARCH_URL,
+            headers={"X-API-Key": self.api_key},
+            params=params,
+        )
+        response.raise_for_status()
+        data = response.json()
+        if data.get("status") == "error":
+            message = data.get("message") or data.get("msg") or "unknown error"
+            raise RuntimeError(f"TwitterAPI.io advanced_search 返回错误: {message}")
+        return data
+
+    async def _fetch_new_tweets(self):
+        """从 TwitterAPI.io 获取最近 CHECK_INTERVAL 分钟内的推文。"""
+        if not self.api_key:
+            raise RuntimeError("缺少 TwitterAPI.io API key")
+
+        seen_ids = set()
+
+        tweets = []
+        next_cursor = None
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            while True:
+                data = await self._fetch_tweet_search_window(client, next_cursor)
+                tweets.extend(
+                    self._dedupe_tweets(data.get("tweets", []) or [], seen_ids)
+                )
+
+                next_cursor = data.get("next_cursor")
+                if not (data.get("has_next_page") and next_cursor):
+                    break
+
+        tweets.sort(
+            key=lambda item: self._parse_tweet_datetime(item)
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
+        return tweets
+
+    def _store_tweets_history(self, tweets: list[dict]) -> None:
+        for tweet in tweets:
+            try:
+                record = self.history_store.add_tweet(
+                    tweet,
+                    account=str(self.target_account or ""),
+                )
+                logger.info(f"历史推文已记录为 #{record.short_id}")
+            except Exception as error:
+                tweet_id = self._extract_tweet_id(tweet) or "unknown"
+                logger.error(f"历史推文入库失败 tweet_id={tweet_id}: {error}")
+
+    @staticmethod
+    def _normalize_history_short_id(raw_value: str | None) -> str | None:
+        short_id = TweetHistoryStore.normalize_short_id(raw_value)
+        return short_id if len(short_id) == 6 else None
+
+    @staticmethod
+    def _parse_x_command(message: str) -> tuple[str | None, str | None]:
+        raw_message = str(message or "").strip()
+        match = re.match(
+            r"^/?x(?:\s+(?P<short_id>\S+)(?P<translation>[\s\S]*))?\s*$",
+            raw_message,
+            flags=re.IGNORECASE,
+        )
+        if not match:
+            return None, None
+
+        short_id = TweetHistoryStore.normalize_short_id(match.group("short_id"))
+        if len(short_id) != 6:
+            short_id = None
+        translation = match.group("translation")
+        if translation is not None:
+            translation = translation.lstrip()
+            if not translation.strip():
+                translation = None
+        return short_id, translation
+
+    @staticmethod
+    def _summarize_history_text(text: str, limit: int = 80) -> str:
+        summary = " ".join(str(text or "").split()) or "(无正文)"
+        if len(summary) <= limit:
+            return summary
+        return f"{summary[: limit - 1]}..."
+
+    def _build_history_list_message(self, limit: int = 10) -> str:
+        records = self.history_store.list_recent(limit)
+        if not records:
+            return "暂无历史推文。"
+
+        lines = [f"最近 {len(records)} 条历史推文："]
+        for index, record in enumerate(records, 1):
+            created_at = record.created_at or record.stored_at
+            lines.append(
+                f"{index}. #{record.short_id} · {created_at}\n"
+                f"{self._summarize_history_text(record.original_text)}"
+            )
+        return "\n".join(lines)
+
+    async def _render_history_record_to_base64(
+        self,
+        record,
+        translation_text: str | None,
+    ) -> str:
+        extra_options = None
+        if translation_text is not None:
+            extra_options = {
+                "text_override": translation_text,
+                "translation_style": True,
+            }
+        return await self._render_tweet_to_base64(record.tweet, extra_options)
+
+    @filter.command("new", alias={"newx"})
+    async def get_latest_tweet_command(self, event: AstrMessageEvent):
+        """手动触发获取最新推文的命令。"""
+        try:
+            data = await self._fetch_new_tweets()
+            if not data:
+                yield event.plain_result(
+                    f"{self.target_account} 在最近 {self.check_interval_minutes} 分钟内没有新推文。"
+                )
+                return
+
+            self._store_tweets_history(data)
+            lines = [f"找到 {len(data)} 条推文："]
+            for index, tweet in enumerate(data):
+                if index > 0:
+                    lines.append("")
+                lines.extend(self._build_tweet_display_lines(tweet, include_link=False))
+            yield event.plain_result("\n".join(lines))
+        except Exception as e:
+            yield event.plain_result(f"请求失败: {e}")
+
+    @filter.command("history")
+    async def get_history_command(self, event: AstrMessageEvent):
+        """查看最近保存的历史推文。"""
+        try:
+            yield event.plain_result(self._build_history_list_message(limit=10))
+        except Exception as e:
+            yield event.plain_result(f"读取历史推文失败: {e}")
+
+    @filter.command("x")
+    async def render_history_tweet_command(self, event: AstrMessageEvent):
+        """按短 ID 重新渲染历史推文，或用翻译正文渲染翻译版。"""
+        try:
+            short_id, translation_text = self._parse_x_command(event.get_message_str())
+            if short_id is None:
+                yield event.plain_result("用法：/x <短ID> [翻译正文]")
+                return
+
+            try:
+                record = self.history_store.get_by_short_id(short_id)
+            except TweetHistoryLookupCollision as error:
+                yield event.plain_result(str(error))
+                return
+
+            if record is None:
+                yield event.plain_result(f"未找到 #{short_id} 对应的历史推文。")
+                return
+
+            image_base64 = await self._render_history_record_to_base64(
+                record,
+                translation_text,
+            )
+            yield event.make_result().base64_image(image_base64)
+        except Exception as e:
+            yield event.plain_result(f"渲染历史推文失败: {e}")
+
+    async def check_for_new_tweets(self) -> None:
+        """用于获取最新推文并记录的计划任务。"""
+        try:
+            data = await self._fetch_new_tweets()
+            if not data:
+                logger.info(
+                    f"@{self.target_account} 在最近 {self.check_interval_minutes} 分钟内没有新推文。"
+                )
+                return
+
+            logger.info(f"发现 {len(data)} 条来自 @{self.target_account} 的新推文。")
+            self._store_tweets_history(data)
+            await self.notify_subscribers(data)
+            for tweet in data:
+                created_at = self._format_created_at(tweet)
+                text = self._sanitize_tweet_text(tweet)
+                logger.info(f"[{created_at}] {text}")
+        except Exception as e:
+            logger.error(f"计划任务 'check_for_new_tweets' 失败: {e}")
+
+    async def terminate(self):
+        """通过取消计划任务来清理插件。"""
+        if self.job_id:
+            self.scheduler.cancel_job(self.job_id)
+            logger.info(f"成功取消了任务 'check_for_new_tweets'，ID为: {self.job_id}")
