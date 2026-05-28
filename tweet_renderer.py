@@ -879,20 +879,7 @@ def _draw_footer(
     xy: tuple[int, int],
     fonts: dict[str, Font],
 ) -> None:
-    x = float(xy[0])
-    y = xy[1]
-    view_count = _extract_view_count(tweet)
-    if view_count is None:
-        draw.text((x, y), _format_created_at(tweet), font=fonts["footer"], fill=GRAY)
-        return
-
-    prefix = f"{_format_created_at(tweet)} · "
-    views_text = _format_view_count(view_count)
-    draw.text((x, y), prefix, font=fonts["footer"], fill=GRAY)
-    x += draw.textlength(prefix, font=fonts["footer"])
-    draw.text((x, y), views_text, font=fonts["footer_bold"], fill=BLACK)
-    x += draw.textlength(views_text, font=fonts["footer_bold"])
-    draw.text((x, y), " 浏览", font=fonts["footer"], fill=GRAY)
+    draw.text(xy, _format_created_at(tweet), font=fonts["footer"], fill=GRAY)
 
 
 def _draw_footer_logo(
@@ -1350,11 +1337,7 @@ def _is_emoji_char(char: str) -> bool:
 
 
 def _format_footer(tweet: dict[str, Any]) -> str:
-    parts = [_format_created_at(tweet)]
-    view_count = _extract_view_count(tweet)
-    if view_count is not None:
-        parts.append(f"{_format_view_count(view_count)} 浏览")
-    return " · ".join(parts)
+    return _format_created_at(tweet)
 
 
 def _format_card_source_line(tweet: dict[str, Any]) -> str | None:
@@ -1443,37 +1426,6 @@ def _parse_created_at(value: Any) -> datetime | None:
     if parsed_at.tzinfo is None:
         parsed_at = parsed_at.replace(tzinfo=timezone.utc)
     return parsed_at
-
-
-def _extract_view_count(tweet: dict[str, Any]) -> int | None:
-    candidates = (
-        tweet.get("viewCount"),
-        tweet.get("view_count"),
-        tweet.get("views"),
-        (tweet.get("public_metrics") or {}).get("impression_count")
-        if isinstance(tweet.get("public_metrics"), dict)
-        else None,
-    )
-    for candidate in candidates:
-        if candidate is None or candidate == "":
-            continue
-        try:
-            return int(candidate)
-        except (TypeError, ValueError):
-            continue
-    return None
-
-
-def _format_view_count(value: int) -> str:
-    value = int(value)
-    sign = "-" if value < 0 else ""
-    value = abs(value)
-    for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
-        if value >= threshold:
-            compact = (value // (threshold // 10)) / 10
-            text = f"{compact:.1f}".rstrip("0").rstrip(".")
-            return f"{sign}{text}{suffix}"
-    return f"{sign}{value}"
 
 
 def _load_avatar(

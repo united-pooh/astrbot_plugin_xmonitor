@@ -67,6 +67,11 @@ def _blackish(pixel) -> bool:
     return red < 70 and green < 80 and blue < 90
 
 
+def _grayish(pixel) -> bool:
+    red, green, blue = pixel[:3]
+    return 60 <= red <= 150 and 70 <= green <= 160 and 80 <= blue <= 175
+
+
 def _pixel_bbox(image: Image.Image, predicate) -> tuple[int, int, int, int] | None:
     rgb_image = image.convert("RGB")
     pixels = rgb_image.load()
@@ -333,14 +338,14 @@ class TweetRendererTest(unittest.TestCase):
         assert bbox is not None
         self.assertLessEqual(bbox[3] - bbox[1], fonts["body"].size // 2)
 
-    def test_footer_uses_shanghai_time_and_compact_views(self) -> None:
+    def test_footer_uses_shanghai_time_without_views(self) -> None:
         footer = tweet_renderer._format_footer(_sample_tweet())
 
         self.assertIn("上午9:02", footer)
         self.assertIn("2024年5月1日", footer)
-        self.assertIn("252.9K 浏览", footer)
+        self.assertNotIn("浏览", footer)
 
-    def test_footer_draws_only_view_number_in_bold(self) -> None:
+    def test_footer_draws_only_timestamp(self) -> None:
         class Recorder:
             def __init__(self):
                 self.calls = []
@@ -362,15 +367,10 @@ class TweetRendererTest(unittest.TestCase):
             {"footer": regular_font, "footer_bold": bold_font},
         )
 
-        self.assertEqual(len(recorder.calls), 3)
+        self.assertEqual(len(recorder.calls), 1)
+        self.assertEqual(recorder.calls[0][1], "上午9:02 · 2024年5月1日")
         self.assertIs(recorder.calls[0][2], regular_font)
         self.assertEqual(recorder.calls[0][3], tweet_renderer.GRAY)
-        self.assertEqual(recorder.calls[1][1], "252.9K")
-        self.assertIs(recorder.calls[1][2], bold_font)
-        self.assertEqual(recorder.calls[1][3], tweet_renderer.BLACK)
-        self.assertEqual(recorder.calls[2][1], " 浏览")
-        self.assertIs(recorder.calls[2][2], regular_font)
-        self.assertEqual(recorder.calls[2][3], tweet_renderer.GRAY)
 
     def test_header_badges_render_and_actions_are_hidden_by_default(self) -> None:
         tweet = _sample_tweet(
@@ -745,7 +745,7 @@ class TweetRendererTest(unittest.TestCase):
 
         footer_bbox = _pixel_bbox(
             image.crop((0, green_bbox[3] + 1, image.width, image.height)),
-            _blackish,
+            _grayish,
         )
         self.assertIsNotNone(footer_bbox)
 
@@ -783,13 +783,13 @@ class TweetRendererTest(unittest.TestCase):
         self.assertLessEqual(orange_bbox[2], image.width - 32)
 
         footer_crop = image.crop((0, green_bbox[3] + 1, image.width, image.height))
-        footer_black_bbox = _pixel_bbox(footer_crop, _blackish)
+        footer_text_bbox = _pixel_bbox(footer_crop, _grayish)
         footer_logo_bbox = _pixel_bbox(footer_crop, _orangeish)
-        self.assertIsNotNone(footer_black_bbox)
+        self.assertIsNotNone(footer_text_bbox)
         self.assertIsNotNone(footer_logo_bbox)
-        assert footer_black_bbox is not None
+        assert footer_text_bbox is not None
         assert footer_logo_bbox is not None
-        self.assertLessEqual(abs(footer_black_bbox[3] - footer_logo_bbox[3]), 3)
+        self.assertLessEqual(abs(footer_text_bbox[3] - footer_logo_bbox[3]), 3)
 
     def test_missing_or_disabled_remote_images_do_not_break_rendering(self) -> None:
         image = render_image(
