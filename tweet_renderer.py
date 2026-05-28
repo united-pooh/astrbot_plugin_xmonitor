@@ -1006,7 +1006,7 @@ def _parse_rich_text(tweet: dict[str, Any]) -> list[TextSegment]:
         raw_token = match.group(0)
         if raw_token.startswith("http://") or raw_token.startswith("https://"):
             token, trailing = _split_url_trailing_punctuation(raw_token)
-            display = display_map.get(token, token)
+            display = display_map.get(token, _format_plain_url_display(token))
             segments.append(TextSegment(display, "link", BLUE, True))
             if trailing:
                 segments.append(TextSegment(trailing))
@@ -1049,6 +1049,21 @@ def _split_url_trailing_punctuation(raw_url: str) -> tuple[str, str]:
         trailing = token[-1] + trailing
         token = token[:-1]
     return token, trailing
+
+
+def _format_plain_url_display(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    if not parsed.scheme or not parsed.netloc:
+        return raw_url
+
+    display = parsed.netloc + parsed.path
+    if parsed.params:
+        display += f";{parsed.params}"
+    if parsed.query:
+        display += f"?{parsed.query}"
+    if parsed.fragment:
+        display += f"#{parsed.fragment}"
+    return display or raw_url
 
 
 def _url_display_map(tweet: dict[str, Any]) -> dict[str, str]:

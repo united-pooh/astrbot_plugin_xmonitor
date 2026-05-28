@@ -197,6 +197,24 @@ class TweetRendererTest(unittest.TestCase):
         self.assertEqual(hashtag_segment.text, "#BlueArchive")
         self.assertEqual(hashtag_segment.fill, tweet_renderer.BLUE)
 
+    def test_plain_url_uses_x_style_display_without_scheme(self) -> None:
+        segments = tweet_renderer._parse_rich_text(
+            _sample_tweet(
+                text="手打 https://example.com/news?a=1#top #BlueArchive",
+                entities={"urls": []},
+            )
+        )
+
+        link_segment = next(segment for segment in segments if segment.kind == "link")
+        hashtag_segment = next(
+            segment for segment in segments if segment.kind == "hashtag"
+        )
+
+        self.assertEqual(link_segment.text, "example.com/news?a=1#top")
+        self.assertEqual(link_segment.fill, tweet_renderer.BLUE)
+        self.assertTrue(link_segment.underline)
+        self.assertEqual(hashtag_segment.text, "#BlueArchive")
+
     def test_display_url_link_renders_blue_near_margin(self) -> None:
         image = render_image(_sample_tweet(text="https://t.co/abc opens with a link"))
 
