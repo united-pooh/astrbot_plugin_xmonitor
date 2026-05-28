@@ -50,6 +50,16 @@ DEFAULT_VERIFIED_BADGE_SIZE = 26
 DEFAULT_BADGE_GAP = 6
 GOLD = (226, 183, 25)
 DARK_BADGE = (15, 20, 25)
+TEXT_GLYPH_COMPATIBILITY_MAP = str.maketrans(
+    {
+        "\u301c": "\uff5e",
+    }
+)
+CJK_FONT_SAMPLE = "汉語あ维護翻訳"
+MISSING_CJK_FONT_MESSAGE = (
+    "未找到可渲染中日韩字符的字体。请安装 Noto Sans CJK/Source Han Sans/"
+    "WenQuanYi 等字体，或在插件配置 FONT_PATHS 中指定字体文件路径。"
+)
 
 
 @dataclass(frozen=True)
@@ -230,6 +240,22 @@ def _load_fonts(options: dict[str, Any]) -> dict[str, Font]:
             "/Library/Fonts/Arial Unicode.ttf",
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSans-Regular.ttc",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Regular.otf",
+            "/usr/share/fonts/adobe-source-han-sans/SourceHanSansSC-Regular.otf",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/arphic/ukai.ttc",
+            "C:/Windows/Fonts/msyh.ttc",
+            "C:/Windows/Fonts/msgothic.ttc",
         ]
     )
     bold_font_paths = list(options.get("bold_font_paths") or [])
@@ -240,6 +266,20 @@ def _load_fonts(options: dict[str, Any]) -> dict[str, Font]:
             "/System/Library/Fonts/ヒラギノ角ゴシック W7.ttc",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
             "/Library/Fonts/Arial Bold.ttf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSans-Bold.ttc",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Bold.otf",
+            "/usr/share/fonts/adobe-source-han-sans/SourceHanSansSC-Bold.otf",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
+            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+            "C:/Windows/Fonts/msyhbd.ttc",
+            "C:/Windows/Fonts/msgothic.ttc",
         ]
     )
     return {
@@ -294,7 +334,12 @@ def _load_emoji_font(size: int, options: dict[str, Any]) -> Font | None:
     return None
 
 
-def _load_font(font_paths: list[Any], size: int) -> Font:
+def _load_font(
+    font_paths: list[Any],
+    size: int,
+    *,
+    require_cjk: bool = True,
+) -> Font:
     for source in font_paths:
         index = 0
         if isinstance(source, (list, tuple)):
@@ -310,13 +355,46 @@ def _load_font(font_paths: list[Any], size: int) -> Font:
             path = str(source)
         try:
             if path and Path(path).exists():
-                return ImageFont.truetype(path, size=size, index=index)
+                font = ImageFont.truetype(path, size=size, index=index)
+                if not require_cjk or _font_supports_cjk(font):
+                    return font
         except OSError:
             continue
     try:
-        return ImageFont.truetype("Arial.ttf", size=size)
+        font = ImageFont.truetype("Arial.ttf", size=size)
+        if not require_cjk or _font_supports_cjk(font):
+            return font
     except OSError:
-        return ImageFont.load_default()
+        pass
+    default_font = ImageFont.load_default()
+    if not require_cjk or _font_supports_cjk(default_font):
+        return default_font
+    raise RuntimeError(MISSING_CJK_FONT_MESSAGE)
+
+
+def _font_supports_cjk(font: Font) -> bool:
+    signatures: set[tuple[tuple[int, int, int, int], bytes]] = set()
+    for character in CJK_FONT_SAMPLE:
+        signature = _glyph_bitmap_signature(font, character)
+        if signature is not None:
+            signatures.add(signature)
+    return len(signatures) >= 5
+
+
+def _glyph_bitmap_signature(
+    font: Font,
+    character: str,
+) -> tuple[tuple[int, int, int, int], bytes] | None:
+    image = Image.new("L", (96, 96), 0)
+    draw = ImageDraw.Draw(image)
+    try:
+        draw.text((8, 8), character, font=font, fill=255)
+    except (OSError, UnicodeEncodeError):
+        return None
+    bbox = image.getbbox()
+    if bbox is None:
+        return None
+    return bbox, image.crop(bbox).tobytes()
 
 
 def _line_height(font: Font, padding: int) -> int:
@@ -747,11 +825,21 @@ def _tweet_for_body_text(
     tweet: dict[str, Any],
     options: dict[str, Any],
 ) -> dict[str, Any]:
-    if "text_override" not in options:
+    raw_text = (
+        str(options.get("text_override") or "")
+        if "text_override" in options
+        else str(tweet.get("text") or "")
+    )
+    render_text = _normalize_text_for_rendering(raw_text)
+    if "text_override" not in options and render_text == raw_text:
         return tweet
     body_tweet = dict(tweet)
-    body_tweet["text"] = str(options.get("text_override") or "")
+    body_tweet["text"] = render_text
     return body_tweet
+
+
+def _normalize_text_for_rendering(text: str) -> str:
+    return text.translate(TEXT_GLYPH_COMPATIBILITY_MAP)
 
 
 def _split_url_trailing_punctuation(raw_url: str) -> tuple[str, str]:
@@ -1517,7 +1605,7 @@ def _placeholder_avatar(tweet: dict[str, Any], size: int) -> Image.Image:
     initial = (name.strip()[:1] or "?").upper()
     image = Image.new("RGB", (size, size), (29, 155, 240))
     draw = ImageDraw.Draw(image)
-    font = _load_font([], max(16, size // 2))
+    font = _load_font([], max(16, size // 2), require_cjk=False)
     bbox = draw.textbbox((0, 0), initial, font=font)
     draw.text(
         ((size - (bbox[2] - bbox[0])) / 2, (size - (bbox[3] - bbox[1])) / 2 - 2),

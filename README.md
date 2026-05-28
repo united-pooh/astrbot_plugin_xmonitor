@@ -23,6 +23,11 @@ AstrBot 推特观察者插件。插件会定时调用 TwitterAPI.io 的 `advance
 - `SUBSCRIBE_GROUPS`: 要主动推送通知的群号列表。
 - `NOTIFY_USER`: 广播时要 `@` 的用户 QQ，不填则不 `@`。
 - `SOURCE_LOGO`: 正文下方的一行来源 logo 图片路径；相对路径按插件目录解析，留空则不显示。
+- `AUTO_DOWNLOAD_FONTS`: 是否在插件初始化时后台下载 Noto Sans CJK 字体到 `data/fonts`，默认开启；下载任务不会阻塞 `initialize()`。
+- `FONT_PATHS`: 自定义常规字体路径列表。Docker 容器无法访问系统 CJK 字体时，可以挂载字体文件后在这里指定路径。
+- `BOLD_FONT_PATHS`: 自定义粗体字体路径列表；不填时会回退到 `FONT_PATHS` 或默认字体。
+
+Docker 容器中如果没有 CJK 字体，Pillow 会把中文/日文渲染成方框。插件会优先使用配置的字体路径，其次使用自动下载到 `data/fonts` 的 Noto Sans CJK，再尝试常见系统字体路径；如果仍找不到可用字体，会返回明确错误而不是继续生成全方框图片。
 
 ## 依赖
 

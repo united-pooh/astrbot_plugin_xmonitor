@@ -297,6 +297,20 @@ class TweetRendererTest(unittest.TestCase):
             )
         )
 
+    def test_wave_dash_is_normalized_to_renderable_fullwidth_tilde(self) -> None:
+        fonts = tweet_renderer._load_fonts({})
+        body_tweet = tweet_renderer._tweet_for_body_text(
+            _sample_tweet(text="5/29(金) 11:00 〜 17:00前後"),
+            {},
+        )
+        bbox, _signature = _glyph_signature(fonts["body"], "～")
+
+        self.assertIn("～", body_tweet["text"])
+        self.assertNotIn("〜", body_tweet["text"])
+        self.assertIsNotNone(bbox)
+        assert bbox is not None
+        self.assertLessEqual(bbox[3] - bbox[1], fonts["body"].size // 2)
+
     def test_footer_uses_shanghai_time_and_compact_views(self) -> None:
         footer = tweet_renderer._format_footer(_sample_tweet())
 

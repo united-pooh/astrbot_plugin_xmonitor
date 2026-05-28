@@ -27,5 +27,20 @@
     "description": "推文正文下方的一行来源 logo 图片路径，留空则不显示；相对路径按插件目录解析",
     "type": "string",
     "default": "assets/source_logo.png"
+  },
+  "AUTO_DOWNLOAD_FONTS": {
+    "description": "启动时后台下载 Noto Sans CJK 字体到 data/fonts，避免 Docker 容器缺字体导致渲染为方框",
+    "type": "bool",
+    "default": true
+  },
+  "FONT_PATHS": {
+    "description": "自定义常规字体路径列表；Docker 内可挂载 Noto/思源/WenQuanYi 字体后填入这里",
+    "type": "list",
+    "default": []
+  },
+  "BOLD_FONT_PATHS": {
+    "description": "自定义粗体字体路径列表；不填时会回退到 FONT_PATHS 或默认字体",
+    "type": "list",
+    "default": []
   }
 }

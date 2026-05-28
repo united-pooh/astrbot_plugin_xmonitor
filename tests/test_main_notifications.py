@@ -174,6 +174,10 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         "StarTools": FakeStarTools,
         "asyncio": asyncio,
         "logger": logger,
+        "PLUGIN_DIR": REPO_ROOT,
+        "DEFAULT_FONT_DIR": REPO_ROOT / "data" / "fonts",
+        "DEFAULT_FONT_DOWNLOADS": (),
+        "_download_font_file": lambda url, output_path: None,
         "render_to_base64": render_to_base64_func,
         "re": __import__("re"),
         "TweetHistoryStore": TweetHistoryStore,
@@ -184,6 +188,12 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         "_sanitize_tweet_text",
         "_parse_tweet_datetime",
         "_normalize_source_logo",
+        "_normalize_bool",
+        "_normalize_path_list",
+        "_refresh_render_font_settings",
+        "_start_font_bootstrap_task",
+        "_ensure_render_fonts",
+        "_wait_for_font_bootstrap",
         "_format_created_at",
         "_build_tweet_display_lines",
         "_build_notification_message",
@@ -218,6 +228,14 @@ def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
         _normalize_source_logo = staticmethod(
             _unwrap(namespace["_normalize_source_logo"])
         )
+        _normalize_bool = staticmethod(_unwrap(namespace["_normalize_bool"]))
+        _normalize_path_list = staticmethod(_unwrap(namespace["_normalize_path_list"]))
+        _refresh_render_font_settings = _unwrap(
+            namespace["_refresh_render_font_settings"]
+        )
+        _start_font_bootstrap_task = _unwrap(namespace["_start_font_bootstrap_task"])
+        _ensure_render_fonts = _unwrap(namespace["_ensure_render_fonts"])
+        _wait_for_font_bootstrap = _unwrap(namespace["_wait_for_font_bootstrap"])
         _format_created_at = _unwrap(namespace["_format_created_at"])
         _build_tweet_display_lines = _unwrap(namespace["_build_tweet_display_lines"])
         _build_notification_message = _unwrap(namespace["_build_notification_message"])

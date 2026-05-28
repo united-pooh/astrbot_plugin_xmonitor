@@ -2,6 +2,8 @@ import asyncio
 import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import httpx
 from astrbot.api import AstrBotConfig, logger
@@ -24,6 +26,50 @@ try:
     from .history_store import TweetHistoryLookupCollision, TweetHistoryStore
 except ImportError:  # pragma: no cover - local script fallback for lightweight probes.
     from history_store import TweetHistoryLookupCollision, TweetHistoryStore
+
+
+PLUGIN_DIR = Path(__file__).resolve().parent
+DEFAULT_FONT_DIR = PLUGIN_DIR / "data" / "fonts"
+DEFAULT_FONT_DOWNLOADS = (
+    (
+        "NotoSansCJKsc-Regular.otf",
+        "https://raw.githubusercontent.com/notofonts/noto-cjk/main/"
+        "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Regular.otf",
+    ),
+    (
+        "NotoSansCJKsc-Bold.otf",
+        "https://raw.githubusercontent.com/notofonts/noto-cjk/main/"
+        "Sans/OTF/SimplifiedChinese/NotoSansCJKsc-Bold.otf",
+    ),
+)
+
+
+def _download_font_file(url: str, output_path: Path) -> None:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    try:
+        request = Request(url, headers={"User-Agent": "xmonitor-font-bootstrap/1.0"})
+        with urlopen(request, timeout=120) as response:
+            status = getattr(response, "status", 200)
+            if status >= 400:
+                raise RuntimeError(f"下载字体失败，HTTP {status}: {url}")
+            with temp_path.open("wb") as output:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    output.write(chunk)
+        if temp_path.stat().st_size < 1024 * 1024:
+            raise RuntimeError(f"下载的字体文件过小，可能不是有效字体: {url}")
+        temp_path.replace(output_path)
+    except (OSError, URLError, TimeoutError) as error:
+        raise RuntimeError(f"下载字体失败: {url}: {error}") from error
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
 
 
 @register("astrbot_plugin_xmonitor", "united_pooh", "一个api调用器", "1.0.0")
@@ -49,6 +95,8 @@ class XMonitor(Star):
         self.source_logo = self._normalize_source_logo(
             self.config.get("SOURCE_LOGO", "assets/source_logo.png")
         )
+        self._refresh_render_font_settings()
+        self._font_bootstrap_task: asyncio.Task | None = None
         self.history_store = TweetHistoryStore(self._history_db_path())
 
     async def initialize(self):
@@ -67,6 +115,8 @@ class XMonitor(Star):
         self.source_logo = self._normalize_source_logo(
             self.config.get("SOURCE_LOGO", "assets/source_logo.png")
         )
+        self._refresh_render_font_settings()
+        self._start_font_bootstrap_task()
 
         self.job_id = self.scheduler.add_job(
             self.check_for_new_tweets,
@@ -134,8 +184,99 @@ class XMonitor(Star):
         return str(logo_path)
 
     @staticmethod
+    def _normalize_bool(raw_value, default: bool = True) -> bool:
+        if raw_value is None:
+            return default
+        if isinstance(raw_value, bool):
+            return raw_value
+        text = str(raw_value).strip().lower()
+        if not text:
+            return default
+        return text not in {"0", "false", "no", "off", "关闭", "否"}
+
+    @staticmethod
+    def _normalize_path_list(raw_value) -> list[str]:
+        if raw_value is None:
+            return []
+        if isinstance(raw_value, str):
+            parts = re.split(r"[\n,;]+", raw_value)
+        elif isinstance(raw_value, list):
+            parts = raw_value
+        else:
+            parts = [raw_value]
+
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in parts:
+            path_text = str(item).strip()
+            if not path_text:
+                continue
+            path = Path(path_text).expanduser()
+            if not path.is_absolute():
+                path = PLUGIN_DIR / path
+            resolved = str(path)
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            paths.append(resolved)
+        return paths
+
+    def _refresh_render_font_settings(self) -> None:
+        self.auto_download_fonts = self._normalize_bool(
+            self.config.get("AUTO_DOWNLOAD_FONTS", True),
+            default=True,
+        )
+        self.font_paths = self._normalize_path_list(self.config.get("FONT_PATHS"))
+        self.bold_font_paths = self._normalize_path_list(
+            self.config.get("BOLD_FONT_PATHS")
+        )
+        auto_paths = [DEFAULT_FONT_DIR / name for name, _url in DEFAULT_FONT_DOWNLOADS]
+        self.auto_font_paths = [str(path) for path in auto_paths]
+        self.auto_bold_font_paths = [
+            str(path) for path in auto_paths if "bold" in path.name.lower()
+        ]
+
+    def _start_font_bootstrap_task(self) -> None:
+        self._font_bootstrap_task = None
+        if not self.auto_download_fonts:
+            return
+        missing = [
+            (name, url)
+            for name, url in DEFAULT_FONT_DOWNLOADS
+            if not (DEFAULT_FONT_DIR / name).exists()
+        ]
+        if not missing:
+            return
+        self._font_bootstrap_task = asyncio.create_task(
+            self._ensure_render_fonts(missing),
+            name="xmonitor-font-bootstrap",
+        )
+
+    async def _ensure_render_fonts(self, downloads: list[tuple[str, str]]) -> None:
+        logger.info(
+            f"检测到渲染字体缺失，开始后台下载 {len(downloads)} 个 Noto Sans CJK 字体文件。"
+        )
+        for name, url in downloads:
+            output_path = DEFAULT_FONT_DIR / name
+            if output_path.exists():
+                continue
+            try:
+                await asyncio.to_thread(_download_font_file, url, output_path)
+                logger.info(f"渲染字体已下载: {output_path}")
+            except Exception as error:
+                logger.error(f"渲染字体下载失败 {name}: {error}")
+        logger.info("渲染字体后台检查完成。")
+
+    async def _wait_for_font_bootstrap(self) -> None:
+        task = getattr(self, "_font_bootstrap_task", None)
+        if task is None or task.done():
+            return
+        logger.info("渲染字体仍在下载，等待后台字体任务完成后继续生成图片。")
+        await task
+
+    @staticmethod
     def _history_db_path() -> Path:
-        return Path(__file__).resolve().parent / "data" / "tweet_history.sqlite3"
+        return PLUGIN_DIR / "data" / "tweet_history.sqlite3"
 
     @staticmethod
     def _validate_check_interval_minutes(raw_value) -> int:
@@ -237,6 +378,15 @@ class XMonitor(Star):
         source_logo = getattr(self, "source_logo", None)
         if source_logo:
             render_options["source_logo"] = source_logo
+        font_paths = list(getattr(self, "font_paths", []))
+        bold_font_paths = list(getattr(self, "bold_font_paths", []))
+        if getattr(self, "auto_download_fonts", False):
+            font_paths.extend(getattr(self, "auto_font_paths", []))
+            bold_font_paths.extend(getattr(self, "auto_bold_font_paths", []))
+        if font_paths:
+            render_options["font_paths"] = font_paths
+        if bold_font_paths:
+            render_options["bold_font_paths"] = bold_font_paths
         if extra_options:
             render_options.update(extra_options)
         return render_options or None
@@ -246,6 +396,7 @@ class XMonitor(Star):
         tweet: dict,
         extra_options: dict | None = None,
     ) -> str:
+        await self._wait_for_font_bootstrap()
         return await asyncio.to_thread(
             render_to_base64,
             tweet,
@@ -532,6 +683,9 @@ class XMonitor(Star):
 
     async def terminate(self):
         """通过取消计划任务来清理插件。"""
+        font_task = getattr(self, "_font_bootstrap_task", None)
+        if font_task is not None and not font_task.done():
+            font_task.cancel()
         if self.job_id:
             self.scheduler.cancel_job(self.job_id)
             logger.info(f"成功取消了任务 'check_for_new_tweets'，ID为: {self.job_id}")
