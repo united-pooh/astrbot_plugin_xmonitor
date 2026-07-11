@@ -5,10 +5,11 @@ APScheduler 管理器
 """
 
 import asyncio
-from typing import Callable, Any
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from typing import Any, Callable
+
+import pytz  # type: ignore[import-untyped]
 from apscheduler.jobstores.base import JobLookupError
-import pytz
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from astrbot.api import logger
 
 

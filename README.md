@@ -1,25 +1,88 @@
-# helloworld
+# astrbot_plugin_xmonitor
 
-AstrBot 插件模板
+AstrBot 推特观察者插件。插件会定时调用 TwitterAPI.io 的 `advanced_search` 接口，监控指定 X/Twitter 账号最近 N 分钟内的新推文，并为每条新推文向订阅群连续发送两条消息：`#历史短ID` 加 Pillow 渲染图，以及原始推文正文加原推文附图。
 
-A template plugin for AstrBot plugin feature
+## 功能
 
-# 推特监控
+- 使用 `within_time:<CHECK_INTERVAL>m` 查询最近 N 分钟内的推文，减少无效返回。
+- 默认查询 `include:nativeretweets`，保留原生转推结果。
+- 使用 Pillow 复现 X/Twitter 推文详情布局，不依赖浏览器或 HTML 截图服务。
+- 从推文纯文本解析 URL 和 hashtag；URL 会使用 `entities.urls[].display_url` 显示，并渲染为蓝色下划线。
+- 支持头像、推文媒体图、卡片图片、时间日期和浏览数渲染。
+- 支持在页脚时间/浏览量同一行右侧插入裁边后的来源 logo，默认使用 `assets/source_logo.png`。
+- 支持按群号覆盖推文卡片头像、展示名和用户名；头像可通过指令从 TwitterAPI.io 用户资料 `profilePicture` 自动写入。
+- 自动把获取到的原始推文保存到本地 sqlite 历史库，并使用原文 SHA-256 前 6 位作为短 ID。
+- 支持 `/history` 查看最近 10 条历史推文，支持 `/x <短ID>` 重新渲染历史原推文图片。
+- 支持 `/x <短ID> <翻译正文>` 使用历史原推文素材渲染翻译正文图片，翻译正文可包含链接、换行、hashtag 和 emoji。
+- 定时推送默认不翻译；可通过 `/xmonitor config translation on|off` 开启或关闭自动文本翻译。
+- 定时推送每条新推文发送两条消息：第一条为 `#历史短ID` 加 `MessageChain().base64_image(...)` 的 Pillow 图；第二条为推文原文加原推文附图 URL 图片。
+- Pillow 图渲染或发送失败时，第一条会回退纯文本通知，并继续尝试发送第二条原文素材消息。
 
-这个插件现在会定时调用 TwitterAPI.io 的 `advanced_search` 接口，增量监控指定账号的新推文。
+## 配置
 
-需要配置的项：
+- `X-API`: TwitterAPI.io 的 API key。
+- `TARGET_ACCOUNT`: 要监控的 X/Twitter 账号，默认 `Blue_ArchiveJP`。
+- `CHECK_INTERVAL`: 轮询间隔和 `within_time` 查询窗口，单位分钟，默认 `10`，必须大于 0。
+- `SUBSCRIBE_GROUPS`: 要主动推送通知的群号列表。
+- `NOTIFY_USER`: 广播时要 `@` 的用户 QQ，不填则不 `@`。
+- `SOURCE_LOGO`: 正文下方的一行来源 logo 图片路径；相对路径按插件目录解析，留空则不显示。
+- `ENABLE_AUTO_TRANSLATION`: 是否对定时推送自动翻译，默认 `false`。
+- `TRANSLATION_PROVIDER_ID`: 用于自动翻译的 AstrBot Chat Provider ID，建议在 WebUI 中选择。
+- `TRANSLATION_SYSTEM_PROMPT`: 自动翻译提示词，默认翻译为简体中文并只输出译文正文。
+- `GROUP_RENDER_OVERRIDES`: 按群号覆盖推文显示身份；通常由 `/xmonitor config avatar ...` 和 `/xmonitor config identity ...` 写入。
 
-- `X-API`: TwitterAPI.io 的 API key
-- `TARGET_ACCOUNT`: 要监控的 X/Twitter 账号
-- `CHECK_INTERVAL`: 轮询间隔，单位秒，必须是 60 的整数倍，且能整除 3600
-- `SUBSCRIBE_GROUPS`: 要主动推送通知的群号列表
+## 依赖
 
-当前默认会监控 `Blue_ArchiveJP`，轮询间隔固定为 10 分钟。
+安装插件依赖：
 
-当定时任务发现新推文时，插件会主动调用 AstrBot 的 `StarTools.send_message_by_id(...)`，
-把通知广播到 `SUBSCRIBE_GROUPS` 里的每个群。
+```bash
+pip install -r requirements.txt
+```
 
-# 支持
+依赖包括 `httpx`、`APScheduler`、`pytz` 和 `Pillow`。
 
-- [插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)
+## 行为说明
+
+定时器使用 APScheduler 的 `interval` 触发器，从插件启动时开始计时。每次查询都会请求 TwitterAPI.io 的 `advanced_search`：
+
+```text
+from:<TARGET_ACCOUNT> include:nativeretweets within_time:<CHECK_INTERVAL>m
+```
+
+如果发现新推文，插件会先把原始正文和原始 JSON 写入 `data/tweet_history.sqlite3`，再为历史库中新写入的推文生成 PNG，并向 `SUBSCRIBE_GROUPS` 中的每个群发送两条消息。第一条包含 `#历史短ID` 和 Pillow 渲染 PNG；第二条包含原始推文正文，并追加推文自带图片 URL。历史短 ID 来自原始正文的 SHA-256 前 6 位，和 `/history` 展示、`/x <短ID>` 查询使用的是同一个索引；同一原始正文重复出现时不会重复入库，也不会在后续定时窗口重复推送。
+
+`SOURCE_LOGO` 图片会自动裁掉透明或纯色边缘，再按页脚一行高度缩放，放在时间/浏览量同一行右侧并与媒体右边框对齐。如果远程头像、媒体图或卡片图加载失败，渲染器会降级处理；如果整张 Pillow 图片渲染或图片消息发送失败，插件会发送纯文本 fallback，并继续尝试发送原文素材消息。
+
+自动翻译只作用于定时推送的第一条 Pillow 渲染图。默认关闭时不会调用 LLM；开启后使用 `TRANSLATION_PROVIDER_ID` 调用 AstrBot `llm_generate`，仅传推文文本，不传图片上下文。第二条始终发送原始推文正文和原推文附图。Provider 缺失、模型失败或返回空译文时会记录日志，并让第一条 Pillow 图继续按原文渲染。
+
+## 命令
+
+- `/new` 或 `/newx`: 手动拉取最近 `<CHECK_INTERVAL>` 分钟内的新推文，并写入历史库。
+- `/history`: 查看最近保存的 10 条历史推文，从新到旧显示，每条包含 `#短ID`、时间和正文摘要。
+- `/x <短ID>`: 按短 ID 查找历史推文，并重新渲染原推文图片。
+- `/x <短ID> <翻译正文>`: 按短 ID 查找历史推文，复用原推文头像、媒体图、卡片图等素材，把正文替换为输入的翻译正文后渲染图片。
+- `/xmonitor config status`: 查看当前自动翻译、Provider 和当前群身份覆盖状态。
+- `/xmonitor config translation on|off`: 开启或关闭定时推送自动翻译，并持久化插件配置。
+- `/xmonitor config avatar <group_id> <userName>`: 调用 TwitterAPI.io `GET /twitter/user/info`，用返回的 `profilePicture` 配置指定群的推文头像，并同步展示名/用户名。
+- `/xmonitor config avatar current <userName>`: 在群聊中为当前群配置头像；私聊中请显式传 `group_id`。
+- `/xmonitor config identity <group_id> <display_name> <username>`: 手动覆盖指定群的展示名和用户名，不修改头像。
+
+`/xmonitor config ...` 管理命令需要 AstrBot 管理员权限。
+
+示例：
+
+```text
+/x 114514 翻译正文 https://example.com/news
+#测试 😀
+```
+
+## 验证
+
+```bash
+python -m unittest discover -s tests
+python -m pytest -q
+python -m py_compile main.py tweet_renderer.py scheduler.py history_store.py tweet_translator.py
+python -m mypy .
+python -m ruff check .
+git diff --check
+```

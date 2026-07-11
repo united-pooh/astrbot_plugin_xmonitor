@@ -210,3 +210,12 @@ __marimo__/
 .vscode/
 __pycache__/
 data/
+
+# macOS metadata
+.DS_Store
+
+# Local pipeline and renderer proof artifacts
+.pipeline-last-run-summary.json
+/test.html
+/docs/mockups/
+/docs/render-example-with-media.png
