@@ -114,7 +114,7 @@ class XMonitor(Star):
             render_service=self.render_service,
             translation_service=self.translation_service,
             message_builder=self.message_builder,
-            send_message=StarTools.send_message_by_id,
+            send_message=self._send_message_by_id,
             render_options_for_group=runtime_config.render_options_for_group,
             logger=logger,
         )
@@ -127,6 +127,61 @@ class XMonitor(Star):
             render_service=self.render_service,
             message_builder=self.message_builder,
             on_config_changed=self._reload_runtime,
+        )
+
+    async def _send_message_by_id(
+        self,
+        *,
+        type: str,
+        id: str,
+        message_chain: Any,
+        platform: str = "aiocqhttp",
+    ) -> Any:
+        send_by_id = getattr(StarTools, "send_message_by_id", None)
+        if callable(send_by_id):
+            return await send_by_id(
+                type=type,
+                id=id,
+                message_chain=message_chain,
+                platform=platform,
+            )
+        return await self._send_aiocqhttp_message_by_id(
+            type=type,
+            id=id,
+            message_chain=message_chain,
+            platform=platform,
+        )
+
+    async def _send_aiocqhttp_message_by_id(
+        self,
+        *,
+        type: str,
+        id: str,
+        message_chain: Any,
+        platform: str = "aiocqhttp",
+    ) -> None:
+        if platform != "aiocqhttp":
+            raise ValueError(f"不支持的平台: {platform}")
+
+        from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
+            AiocqhttpMessageEvent,
+        )
+        from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter import (
+            AiocqhttpAdapter,
+        )
+
+        platforms = self.context.platform_manager.get_insts()
+        adapter = next(
+            (item for item in platforms if isinstance(item, AiocqhttpAdapter)),
+            None,
+        )
+        if adapter is None:
+            raise ValueError("未找到适配器: AiocqhttpAdapter")
+        await AiocqhttpMessageEvent.send_message(
+            bot=adapter.bot,
+            message_chain=message_chain,
+            is_group=(type == "GroupMessage"),
+            session_id=id,
         )
 
     async def initialize(self) -> None:
