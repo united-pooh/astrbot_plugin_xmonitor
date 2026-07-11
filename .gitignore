@@ -2,14 +2,6 @@
 __pycache__/
 *.py[codz]
 *$py.class
-.DS_Store
-
-# AstrBot runtime/local state
-data/cmd_config.json
-data/tweet_history.sqlite3*
-data/fonts/
-data/t2i_templates/
-test.html
 
 # C extensions
 *.so
@@ -213,3 +205,17 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+.idea/
+.vscode/
+__pycache__/
+data/
+
+# macOS metadata
+.DS_Store
+
+# Local pipeline and renderer proof artifacts
+.pipeline-last-run-summary.json
+/test.html
+/docs/mockups/
+/docs/render-example-with-media.png

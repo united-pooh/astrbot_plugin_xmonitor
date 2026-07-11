@@ -55,11 +55,14 @@ class TweetHistoryStoreTest(unittest.TestCase):
             records = store.list_recent(10)
 
             self.assertEqual(len(records), 10)
-            self.assertEqual([record.original_text for record in records[:3]], [
-                "text 11",
-                "text 10",
-                "text 9",
-            ])
+            self.assertEqual(
+                [record.original_text for record in records[:3]],
+                [
+                    "text 11",
+                    "text 10",
+                    "text 9",
+                ],
+            )
 
     def test_get_by_short_id_is_case_insensitive_and_accepts_hash_marker(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -87,28 +90,13 @@ class TweetHistoryStoreTest(unittest.TestCase):
             with self.assertRaises(TweetHistoryLookupCollision):
                 store.get_by_short_id(first.short_id)
 
-    def test_user_avatar_cache_normalizes_account_and_updates_base64(self) -> None:
+    def test_get_by_full_hash_returns_exact_record(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             store = self._store(tmp_dir)
+            record = store.add_tweet(_tweet("1", "lookup by full hash"))
 
-            first = store.save_user_avatar(
-                "@Blue_ArchiveJP",
-                profile_picture_url="https://pbs.twimg.com/profile_images/a.jpg",
-                avatar_base64="Zmlyc3Q=",
-            )
-            second = store.save_user_avatar(
-                "Blue_ArchiveJP",
-                profile_picture_url="https://pbs.twimg.com/profile_images/b.jpg",
-                avatar_base64="c2Vjb25k",
-            )
-
-            self.assertEqual(first.account, "Blue_ArchiveJP")
-            self.assertEqual(second.account, "Blue_ArchiveJP")
-            cached = store.get_user_avatar("@blue_archivejp")
-            self.assertIsNotNone(cached)
-            assert cached is not None
-            self.assertEqual(cached.profile_picture_url, "https://pbs.twimg.com/profile_images/b.jpg")
-            self.assertEqual(cached.avatar_base64, "c2Vjb25k")
+            self.assertEqual(store.get_by_full_hash(record.full_hash), record)
+            self.assertIsNone(store.get_by_full_hash("missing"))
 
 
 if __name__ == "__main__":

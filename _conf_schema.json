@@ -28,24 +28,47 @@
     "type": "string",
     "default": "assets/source_logo.png"
   },
-  "AUTO_DOWNLOAD_FONTS": {
-    "description": "启动时后台下载 Noto Sans CJK 字体到 data/fonts，避免 Docker 容器缺字体导致渲染为方框",
+  "ENABLE_AUTO_TRANSLATION": {
+    "description": "是否对定时推送的新推文自动翻译，默认关闭；建议通过 /xmonitor config translation on|off 修改",
     "type": "bool",
-    "default": true
+    "default": false
   },
-  "FONT_PATHS": {
-    "description": "自定义常规字体路径列表；Docker 内可挂载 Noto/思源/WenQuanYi 字体后填入这里",
-    "type": "list",
-    "default": []
+  "TRANSLATION_PROVIDER_ID": {
+    "description": "用于自动翻译的 AstrBot Chat Provider，不填则跳过自动翻译",
+    "type": "string",
+    "_special": "select_provider",
+    "default": ""
   },
-  "BOLD_FONT_PATHS": {
-    "description": "自定义粗体字体路径列表；不填时会回退到 FONT_PATHS 或默认字体",
-    "type": "list",
-    "default": []
+  "TRANSLATION_SYSTEM_PROMPT": {
+    "description": "自动翻译使用的系统提示词",
+    "type": "text",
+    "default": "你是一个推文翻译助手。请把用户提供的 X/Twitter 推文正文翻译成简体中文，保留链接、话题标签、换行和 emoji，只输出译文正文。"
   },
-  "EMOJI_FONT_PATHS": {
-    "description": "自定义 emoji 字体路径列表；Docker 内建议挂载 NotoColorEmoji.ttf 或 Twemoji 彩色字体",
-    "type": "list",
-    "default": []
+  "GROUP_RENDER_OVERRIDES": {
+    "description": "按群号覆盖推文显示身份；key 为 group_id，value 可包含 user_name、display_name、username、avatar。avatar 推荐通过 /xmonitor config avatar 指令从 profilePicture 自动写入",
+    "type": "dict",
+    "default": {},
+    "template_schema": {
+      "user_name": {
+        "type": "string",
+        "default": "",
+        "description": "用于记录头像来源的 X 用户名"
+      },
+      "display_name": {
+        "type": "string",
+        "default": "",
+        "description": "推文卡片顶部显示名"
+      },
+      "username": {
+        "type": "string",
+        "default": "",
+        "description": "推文卡片用户名，可带或不带 @"
+      },
+      "avatar": {
+        "type": "string",
+        "default": "",
+        "description": "头像 URL，通常来自 TwitterAPI.io 用户资料 profilePicture"
+      }
+    }
   }
 }

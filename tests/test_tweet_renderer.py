@@ -67,11 +67,6 @@ def _blackish(pixel) -> bool:
     return red < 70 and green < 80 and blue < 90
 
 
-def _grayish(pixel) -> bool:
-    red, green, blue = pixel[:3]
-    return 60 <= red <= 150 and 70 <= green <= 160 and 80 <= blue <= 175
-
-
 def _pixel_bbox(image: Image.Image, predicate) -> tuple[int, int, int, int] | None:
     rgb_image = image.convert("RGB")
     pixels = rgb_image.load()
@@ -116,10 +111,6 @@ def _glyph_signature(
     if bbox is None:
         return None, b""
     return bbox, image.crop(bbox).tobytes()
-
-
-def _noto_color_emoji_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "data" / "fonts" / "NotoColorEmoji.ttf"
 
 
 class TweetRendererTest(unittest.TestCase):
@@ -202,24 +193,6 @@ class TweetRendererTest(unittest.TestCase):
         self.assertEqual(hashtag_segment.text, "#BlueArchive")
         self.assertEqual(hashtag_segment.fill, tweet_renderer.BLUE)
 
-    def test_plain_url_uses_x_style_display_without_scheme(self) -> None:
-        segments = tweet_renderer._parse_rich_text(
-            _sample_tweet(
-                text="手打 https://example.com/news?a=1#top #BlueArchive",
-                entities={"urls": []},
-            )
-        )
-
-        link_segment = next(segment for segment in segments if segment.kind == "link")
-        hashtag_segment = next(
-            segment for segment in segments if segment.kind == "hashtag"
-        )
-
-        self.assertEqual(link_segment.text, "example.com/news?a=1#top")
-        self.assertEqual(link_segment.fill, tweet_renderer.BLUE)
-        self.assertTrue(link_segment.underline)
-        self.assertEqual(hashtag_segment.text, "#BlueArchive")
-
     def test_display_url_link_renders_blue_near_margin(self) -> None:
         image = render_image(_sample_tweet(text="https://t.co/abc opens with a link"))
 
@@ -297,8 +270,7 @@ class TweetRendererTest(unittest.TestCase):
         self.assertTrue(any(segment.text == "#碧蓝档案" for segment in segments))
         self.assertTrue(
             any(
-                segment.text == "bluearchive.jp/news/newsJump/..."
-                and segment.underline
+                segment.text == "bluearchive.jp/news/newsJump/..." and segment.underline
                 for segment in segments
             )
         )
@@ -324,28 +296,14 @@ class TweetRendererTest(unittest.TestCase):
             )
         )
 
-    def test_wave_dash_is_normalized_to_renderable_fullwidth_tilde(self) -> None:
-        fonts = tweet_renderer._load_fonts({})
-        body_tweet = tweet_renderer._tweet_for_body_text(
-            _sample_tweet(text="5/29(金) 11:00 〜 17:00前後"),
-            {},
-        )
-        bbox, _signature = _glyph_signature(fonts["body"], "～")
-
-        self.assertIn("～", body_tweet["text"])
-        self.assertNotIn("〜", body_tweet["text"])
-        self.assertIsNotNone(bbox)
-        assert bbox is not None
-        self.assertLessEqual(bbox[3] - bbox[1], fonts["body"].size // 2)
-
-    def test_footer_uses_shanghai_time_without_views(self) -> None:
+    def test_footer_uses_shanghai_time_and_compact_views(self) -> None:
         footer = tweet_renderer._format_footer(_sample_tweet())
 
         self.assertIn("上午9:02", footer)
         self.assertIn("2024年5月1日", footer)
-        self.assertNotIn("浏览", footer)
+        self.assertIn("252.9K 浏览", footer)
 
-    def test_footer_draws_only_timestamp(self) -> None:
+    def test_footer_draws_only_view_number_in_bold(self) -> None:
         class Recorder:
             def __init__(self):
                 self.calls = []
@@ -367,10 +325,15 @@ class TweetRendererTest(unittest.TestCase):
             {"footer": regular_font, "footer_bold": bold_font},
         )
 
-        self.assertEqual(len(recorder.calls), 1)
-        self.assertEqual(recorder.calls[0][1], "上午9:02 · 2024年5月1日")
+        self.assertEqual(len(recorder.calls), 3)
         self.assertIs(recorder.calls[0][2], regular_font)
         self.assertEqual(recorder.calls[0][3], tweet_renderer.GRAY)
+        self.assertEqual(recorder.calls[1][1], "252.9K")
+        self.assertIs(recorder.calls[1][2], bold_font)
+        self.assertEqual(recorder.calls[1][3], tweet_renderer.BLACK)
+        self.assertEqual(recorder.calls[2][1], " 浏览")
+        self.assertIs(recorder.calls[2][2], regular_font)
+        self.assertEqual(recorder.calls[2][3], tweet_renderer.GRAY)
 
     def test_header_badges_render_and_actions_are_hidden_by_default(self) -> None:
         tweet = _sample_tweet(
@@ -428,6 +391,29 @@ class TweetRendererTest(unittest.TestCase):
                 (1120, 30, 1170, 85),
             )
         )
+
+    def test_header_supports_display_name_and_username_overrides(self) -> None:
+        class Recorder:
+            def __init__(self):
+                self.calls = []
+
+            def text(self, xy, text, font, fill):
+                self.calls.append(text)
+
+            def textlength(self, text, font):
+                return len(text) * 12
+
+        recorder = Recorder()
+        tweet_renderer._draw_header(
+            recorder,
+            _sample_tweet(),
+            (34, 34),
+            tweet_renderer._load_fonts({}),
+            800,
+            {"display_name": "群渲染名", "username": "group_user"},
+        )
+
+        self.assertEqual(recorder.calls[:2], ["群渲染名", "@group_user"])
 
     def test_avatar_and_media_options_are_rendered(self) -> None:
         media = _image((20, 180, 80), (320, 180))
@@ -518,7 +504,6 @@ class TweetRendererTest(unittest.TestCase):
             body_font,
             line_height,
             emoji_font=emoji_font,
-            target_image=image,
         )
 
         emoji_bbox = _pixel_bbox(
@@ -530,115 +515,6 @@ class TweetRendererTest(unittest.TestCase):
         emoji_center_y = (emoji_bbox[1] + emoji_bbox[3]) / 2
         line_center_y = line_top + (line_height / 2)
         self.assertLessEqual(abs(emoji_center_y - line_center_y), 3)
-
-    def test_noto_color_emoji_is_scaled_inside_text_line(self) -> None:
-        emoji_path = _noto_color_emoji_path()
-        if not emoji_path.exists():
-            self.skipTest("Noto Color Emoji fixture is not available")
-
-        fonts = tweet_renderer._load_fonts({"emoji_font_paths": [str(emoji_path)]})
-        emoji_font = fonts.get("emoji")
-        self.assertIsNotNone(emoji_font)
-        body_font = fonts["body"]
-        line_top = 20
-        line_height = tweet_renderer._line_height(
-            body_font,
-            tweet_renderer.DEFAULT_BODY_LINE_PADDING,
-        )
-
-        for emoji in ("😀", "🥰", "❤️", "☕", "🧑‍💻", "🇯🇵", "👍🏻", "1️⃣"):
-            image = Image.new("RGBA", (360, 140), (255, 255, 255, 255))
-            draw = ImageDraw.Draw(image)
-
-            tweet_renderer._draw_rich_lines(
-                draw,
-                [[tweet_renderer.TextSegment(emoji)]],
-                (20, line_top),
-                body_font,
-                line_height,
-                emoji_font=emoji_font,
-                target_image=image,
-            )
-
-            bbox = _pixel_bbox(
-                image,
-                lambda pixel: pixel[:3] != (255, 255, 255),
-            )
-            self.assertIsNotNone(bbox, emoji)
-            assert bbox is not None
-            self.assertGreater(bbox[3] - bbox[1], 10, emoji)
-            self.assertGreaterEqual(bbox[1], line_top, emoji)
-            self.assertLessEqual(bbox[3], line_top + line_height, emoji)
-            emoji_center_y = (bbox[1] + bbox[3]) / 2
-            line_center_y = line_top + (line_height / 2)
-            self.assertLessEqual(abs(emoji_center_y - line_center_y), 3, emoji)
-
-    def test_emoji_advance_matches_single_cjk_text_cell(self) -> None:
-        emoji_path = _noto_color_emoji_path()
-        if not emoji_path.exists():
-            self.skipTest("Noto Color Emoji fixture is not available")
-
-        fonts = tweet_renderer._load_fonts({"emoji_font_paths": [str(emoji_path)]})
-        body_font = fonts["body"]
-        emoji_font = fonts.get("emoji")
-        self.assertIsNotNone(emoji_font)
-        line_height = tweet_renderer._line_height(
-            body_font,
-            tweet_renderer.DEFAULT_BODY_LINE_PADDING,
-        )
-        image = Image.new("RGBA", (500, 120), (255, 255, 255, 255))
-        draw = ImageDraw.Draw(image)
-        cell_width = draw.textlength("国", font=body_font)
-
-        for emoji in ("😀", "🥰", "❤️", "☕", "🧑‍💻", "🇯🇵", "👍🏻", "1️⃣"):
-            width = tweet_renderer._textlength(
-                draw,
-                emoji,
-                body_font,
-                emoji_font,
-                line_height,
-            )
-            self.assertAlmostEqual(width, cell_width, delta=1, msg=emoji)
-
-        mixed_width = tweet_renderer._textlength(
-            draw,
-            "A😀B",
-            body_font,
-            emoji_font,
-            line_height,
-        )
-        expected_width = (
-            draw.textlength("A", font=body_font)
-            + cell_width
-            + draw.textlength("B", font=body_font)
-        )
-        self.assertAlmostEqual(mixed_width, expected_width, delta=1)
-
-    def test_scaled_emoji_width_is_used_for_wrapping(self) -> None:
-        emoji_path = _noto_color_emoji_path()
-        if not emoji_path.exists():
-            self.skipTest("Noto Color Emoji fixture is not available")
-
-        fonts = tweet_renderer._load_fonts({"emoji_font_paths": [str(emoji_path)]})
-        body_font = fonts["body"]
-        emoji_font = fonts.get("emoji")
-        line_height = tweet_renderer._line_height(
-            body_font,
-            tweet_renderer.DEFAULT_BODY_LINE_PADDING,
-        )
-        image = Image.new("RGBA", (500, 120), (255, 255, 255, 255))
-        draw = ImageDraw.Draw(image)
-
-        lines = tweet_renderer._wrap_segments(
-            draw,
-            [tweet_renderer.TextSegment("😀" * 8)],
-            body_font,
-            500,
-            emoji_font=emoji_font,
-            line_height=line_height,
-        )
-
-        self.assertEqual(len(lines), 1)
 
     def test_media_override_spans_almost_full_card_width_from_margin(self) -> None:
         image = render_image(
@@ -745,7 +621,7 @@ class TweetRendererTest(unittest.TestCase):
 
         footer_bbox = _pixel_bbox(
             image.crop((0, green_bbox[3] + 1, image.width, image.height)),
-            _grayish,
+            _blackish,
         )
         self.assertIsNotNone(footer_bbox)
 
@@ -783,13 +659,13 @@ class TweetRendererTest(unittest.TestCase):
         self.assertLessEqual(orange_bbox[2], image.width - 32)
 
         footer_crop = image.crop((0, green_bbox[3] + 1, image.width, image.height))
-        footer_text_bbox = _pixel_bbox(footer_crop, _grayish)
+        footer_black_bbox = _pixel_bbox(footer_crop, _blackish)
         footer_logo_bbox = _pixel_bbox(footer_crop, _orangeish)
-        self.assertIsNotNone(footer_text_bbox)
+        self.assertIsNotNone(footer_black_bbox)
         self.assertIsNotNone(footer_logo_bbox)
-        assert footer_text_bbox is not None
+        assert footer_black_bbox is not None
         assert footer_logo_bbox is not None
-        self.assertLessEqual(abs(footer_text_bbox[3] - footer_logo_bbox[3]), 3)
+        self.assertLessEqual(abs(footer_black_bbox[3] - footer_logo_bbox[3]), 3)
 
     def test_missing_or_disabled_remote_images_do_not_break_rendering(self) -> None:
         image = render_image(
@@ -805,14 +681,10 @@ class TweetRendererTest(unittest.TestCase):
 
     def test_remote_image_url_rejects_private_or_disallowed_hosts(self) -> None:
         self.assertFalse(
-            tweet_renderer._is_safe_remote_image_url(
-                "https://127.0.0.1/avatar.png", {}
-            )
+            tweet_renderer._is_safe_remote_image_url("https://127.0.0.1/avatar.png", {})
         )
         self.assertFalse(
-            tweet_renderer._is_safe_remote_image_url(
-                "https://localhost/avatar.png", {}
-            )
+            tweet_renderer._is_safe_remote_image_url("https://localhost/avatar.png", {})
         )
         self.assertFalse(
             tweet_renderer._is_safe_remote_image_url(

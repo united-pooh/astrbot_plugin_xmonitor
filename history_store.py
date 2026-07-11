@@ -154,6 +154,24 @@ class TweetHistoryStore:
             )
         return self._record_from_row(rows[0])
 
+    def get_by_full_hash(self, full_hash: str | None) -> TweetHistoryRecord | None:
+        normalized = str(full_hash or "").strip().lower()
+        if not normalized:
+            return None
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT *
+                FROM tweet_history
+                WHERE lower(full_hash) = ?
+                LIMIT 1
+                """,
+                (normalized,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._record_from_row(row)
+
     def get_user_avatar(self, account: str | None) -> UserAvatarRecord | None:
         normalized = self._normalize_account(account)
         if normalized is None:

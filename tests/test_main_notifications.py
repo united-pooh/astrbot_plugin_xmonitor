@@ -1,45 +1,30 @@
 from __future__ import annotations
 
-import asyncio
-import ast
-import base64
-import binascii
 import sys
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Any
 
+from command_service import (
+    CommandService,
+    event_group_id,
+    parse_x_command,
+    parse_xmonitor_args,
+)
+from config import build_config_status_message, load_runtime_config
+from history_service import HistoryService, StoredTweet
 from history_store import TweetHistoryLookupCollision, TweetHistoryStore
+from message_builder import MessageBuilder
+from notification_sender import NotificationSender
+from render_service import RenderService
+from translation_service import TranslationService
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-MAIN_PATH = REPO_ROOT / "main.py"
-
-
-def _load_xmonitor_methods() -> dict[str, str]:
-    source = MAIN_PATH.read_text()
-    module = ast.parse(source)
-    class_node = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.ClassDef) and node.name == "XMonitor"
-    )
-    return {
-        node.name: ast.get_source_segment(source, node)
-        for node in class_node.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-
-def _unwrap(value):
-    if isinstance(value, staticmethod):
-        return value.__func__
-    return value
 
 
 class FakeMessageChain:
     def __init__(self) -> None:
-        self.operations = []
+        self.operations: list[tuple[Any, ...]] = []
 
     def at(self, user_id, display_name=None):
         self.operations.append(("at", user_id, display_name))
@@ -53,15 +38,19 @@ class FakeMessageChain:
         self.operations.append(("base64_image", payload))
         return self
 
+    def url_image(self, url):
+        self.operations.append(("url_image", url))
+        return self
+
     def has_operation(self, operation_name: str) -> bool:
         return any(operation[0] == operation_name for operation in self.operations)
 
 
 class FakeLogger:
     def __init__(self) -> None:
-        self.infos = []
-        self.warnings = []
-        self.errors = []
+        self.infos: list[str] = []
+        self.warnings: list[str] = []
+        self.errors: list[str] = []
 
     def info(self, message):
         self.infos.append(message)
@@ -73,12 +62,25 @@ class FakeLogger:
         self.errors.append(message)
 
 
+class FakeConfig(dict):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.save_count = 0
+
+    def save_config(self) -> None:
+        self.save_count += 1
+
+
 class FakeEvent:
-    def __init__(self, message_str: str = "") -> None:
+    def __init__(self, message_str: str = "", group_id: str = "") -> None:
         self.message_str = message_str
+        self.group_id = group_id
 
     def get_message_str(self) -> str:
         return self.message_str
+
+    def get_group_id(self) -> str:
+        return self.group_id
 
     def plain_result(self, text):
         return ("plain", text)
@@ -87,25 +89,40 @@ class FakeEvent:
         return FakeMessageChain()
 
 
+class FakeHistoryRecord:
+    def __init__(
+        self,
+        *,
+        short_id: str,
+        full_hash: str | None = None,
+        original_text: str,
+        tweet: dict[str, Any],
+        created_at: str | None = None,
+        stored_at: str = "2024-05-01T09:02:00+08:00",
+    ) -> None:
+        self.short_id = short_id
+        self.full_hash = full_hash or TweetHistoryStore.hash_text(original_text)[0]
+        self.original_text = original_text
+        self.tweet = tweet
+        self.created_at = created_at
+        self.stored_at = stored_at
+
+
 class FakeHistoryStore:
     def __init__(self, records=None) -> None:
         self.records = list(records or [])
         self.added = []
-        self.avatar_records = {}
-        self.avatar_gets = []
-        self.avatar_saves = []
         self.lookup_error = None
 
     def add_tweet(self, tweet, *, account=None):
         self.added.append((tweet, account))
-        _full_hash, short_id = TweetHistoryStore.hash_text(tweet.get("text", ""))
+        full_hash, short_id = TweetHistoryStore.hash_text(tweet.get("text", ""))
         record = FakeHistoryRecord(
             short_id=short_id,
+            full_hash=full_hash,
             original_text=tweet.get("text", ""),
             tweet=tweet,
             created_at=tweet.get("createdAt"),
-            stored_at="2024-05-01T09:02:00+08:00",
-            account=account,
         )
         self.records.insert(0, record)
         return record
@@ -122,58 +139,30 @@ class FakeHistoryStore:
                 return record
         return None
 
-    def get_user_avatar(self, account):
-        normalized = str(account or "").strip().lstrip("@")
-        self.avatar_gets.append(normalized)
-        return self.avatar_records.get(normalized.lower())
-
-    def save_user_avatar(self, account, *, profile_picture_url, avatar_base64):
-        normalized = str(account or "").strip().lstrip("@")
-        record = FakeAvatarRecord(
-            account=normalized,
-            profile_picture_url=profile_picture_url,
-            avatar_base64=avatar_base64,
-        )
-        self.avatar_records[normalized.lower()] = record
-        self.avatar_saves.append(record)
-        return record
+    def get_by_full_hash(self, full_hash):
+        normalized = str(full_hash or "").strip().lower()
+        for record in self.records:
+            if record.full_hash == normalized:
+                return record
+        return None
 
 
-class FakeHistoryRecord:
-    def __init__(
-        self,
-        *,
-        short_id,
-        original_text,
-        tweet,
-        created_at=None,
-        stored_at="2024-05-01T09:02:00+08:00",
-        account=None,
-    ) -> None:
-        self.short_id = short_id
-        self.original_text = original_text
-        self.tweet = tweet
-        self.created_at = created_at
-        self.stored_at = stored_at
-        self.account = account
+class FakeTwitterClient:
+    def __init__(self, tweets=None, profile=None, profile_error=None) -> None:
+        self.tweets = list(tweets or [])
+        self.profile = profile
+        self.profile_error = profile_error
+
+    async def fetch_recent_tweets(self):
+        return list(self.tweets)
+
+    async def fetch_user_profile(self, user_name: str):
+        if self.profile_error is not None:
+            raise self.profile_error
+        return self.profile
 
 
-class FakeAvatarRecord:
-    def __init__(
-        self,
-        *,
-        account,
-        profile_picture_url,
-        avatar_base64,
-        stored_at="2024-05-01T09:02:00+08:00",
-    ) -> None:
-        self.account = account
-        self.profile_picture_url = profile_picture_url
-        self.avatar_base64 = avatar_base64
-        self.stored_at = stored_at
-
-
-def _tweet(tweet_id: str, text: str) -> dict:
+def _tweet(tweet_id: str, text: str) -> dict[str, Any]:
     return {
         "id": tweet_id,
         "text": text,
@@ -181,173 +170,134 @@ def _tweet(tweet_id: str, text: str) -> dict:
     }
 
 
-async def _collect_async(async_iterable):
-    return [item async for item in async_iterable]
+def _stored_tweet(tweet: dict[str, Any]) -> StoredTweet:
+    full_hash, short_id = TweetHistoryStore.hash_text(str(tweet.get("text") or ""))
+    record = FakeHistoryRecord(
+        short_id=short_id,
+        full_hash=full_hash,
+        original_text=str(tweet.get("text") or ""),
+        tweet=tweet,
+        created_at=tweet.get("createdAt"),
+    )
+    return StoredTweet(tweet=tweet, record=record)
 
 
-def _build_probe(render_to_base64_func, *, fail_image_for_groups=None):
-    methods = _load_xmonitor_methods()
-    logger = FakeLogger()
+def _runtime_config(**overrides) -> FakeConfig:
+    config = FakeConfig(
+        {
+            "X-API": "secret",
+            "TARGET_ACCOUNT": "Blue_ArchiveJP",
+            "CHECK_INTERVAL": 10,
+            "SUBSCRIBE_GROUPS": [],
+            "NOTIFY_USER": "",
+            "SOURCE_LOGO": "",
+            "ENABLE_AUTO_TRANSLATION": False,
+            "TRANSLATION_PROVIDER_ID": "",
+            "TRANSLATION_SYSTEM_PROMPT": "默认翻译提示",
+            "GROUP_RENDER_OVERRIDES": {},
+        }
+    )
+    config.update(overrides)
+    return config
 
-    class FakeStarTools:
-        calls = []
-        fail_image_for = set(fail_image_for_groups or [])
 
-        @classmethod
-        async def send_message_by_id(cls, *, type, id, message_chain):
-            cls.calls.append(
-                {
-                    "type": type,
-                    "id": id,
-                    "message_chain": message_chain,
-                }
-            )
-            if id in cls.fail_image_for and message_chain.has_operation("base64_image"):
-                raise RuntimeError("image send failed")
+def _command_service(
+    *,
+    config: FakeConfig | None = None,
+    history_store: FakeHistoryStore | None = None,
+    twitter_client: FakeTwitterClient | None = None,
+    render_func=None,
+) -> CommandService:
+    config = config or _runtime_config()
+    runtime_config = load_runtime_config(config, base_dir=REPO_ROOT)
+    history_service = HistoryService(
+        history_store or FakeHistoryStore(),
+        account=runtime_config.target_account,
+    )
+    render_service = RenderService(
+        source_logo=runtime_config.source_logo,
+        render_func=render_func or (lambda tweet, options=None: f"png-{tweet['id']}"),
+    )
+    message_builder = MessageBuilder(
+        target_account=runtime_config.target_account,
+        notify_user=runtime_config.notify_user,
+        chain_factory=FakeMessageChain,
+    )
 
-    namespace: dict[str, object] = {
-        "datetime": datetime,
-        "timedelta": timedelta,
-        "timezone": timezone,
-        "Path": Path,
-        "MessageChain": FakeMessageChain,
-        "StarTools": FakeStarTools,
-        "asyncio": asyncio,
-        "base64": base64,
-        "binascii": binascii,
-        "httpx": __import__("httpx"),
-        "urlparse": urlparse,
-        "logger": logger,
-        "PLUGIN_DIR": REPO_ROOT,
-        "DEFAULT_FONT_DIR": REPO_ROOT / "data" / "fonts",
-        "DEFAULT_FONT_DOWNLOADS": (),
-        "DEFAULT_EMOJI_FONT_DOWNLOADS": (),
-        "_download_font_file": lambda url, output_path: None,
-        "render_to_base64": render_to_base64_func,
-        "re": __import__("re"),
-        "TweetHistoryStore": TweetHistoryStore,
-        "TweetHistoryLookupCollision": TweetHistoryLookupCollision,
-    }
-    for method_name in (
-        "_extract_tweet_id",
-        "_sanitize_tweet_text",
-        "_parse_tweet_datetime",
-        "_normalize_source_logo",
-        "_normalize_bool",
-        "_normalize_path_list",
-        "_refresh_render_font_settings",
-        "_start_font_bootstrap_task",
-        "_ensure_render_fonts",
-        "_wait_for_font_bootstrap",
-        "_target_account_name",
-        "_format_created_at",
-        "_build_tweet_display_lines",
-        "_build_notification_message",
-        "_build_text_message_chain",
-        "_build_tweet_image_message_chain",
-        "_build_render_options",
-        "_cached_avatar_image_source",
-        "_render_tweet_to_base64",
-        "_send_text_fallback",
-        "notify_subscribers",
-        "_ensure_target_avatar_cached",
-        "_fetch_profile_picture_url",
-        "_extract_profile_picture_url",
-        "_download_avatar_bytes",
-        "_is_valid_avatar_url",
-        "_store_tweets_history",
-        "_normalize_history_short_id",
-        "_parse_x_command",
-        "_summarize_history_text",
-        "_build_history_list_message",
-        "_render_history_record_to_base64",
-        "_history_record_account",
-        "_ensure_history_record_avatar_cached",
-        "get_latest_tweet_command",
-        "get_history_command",
-        "render_history_tweet_command",
-        "check_for_new_tweets",
-    ):
-        exec(
-            "from __future__ import annotations\n" + methods[method_name],
-            namespace,
-        )
+    def reload_runtime():
+        return load_runtime_config(config, base_dir=REPO_ROOT)
 
-    class Probe:
-        TWITTER_USER_INFO_URL = "https://api.twitterapi.io/twitter/user/info"
-        _extract_tweet_id = staticmethod(_unwrap(namespace["_extract_tweet_id"]))
-        _sanitize_tweet_text = staticmethod(_unwrap(namespace["_sanitize_tweet_text"]))
-        _parse_tweet_datetime = staticmethod(
-            _unwrap(namespace["_parse_tweet_datetime"])
-        )
-        _normalize_source_logo = staticmethod(
-            _unwrap(namespace["_normalize_source_logo"])
-        )
-        _normalize_bool = staticmethod(_unwrap(namespace["_normalize_bool"]))
-        _normalize_path_list = staticmethod(_unwrap(namespace["_normalize_path_list"]))
-        _refresh_render_font_settings = _unwrap(
-            namespace["_refresh_render_font_settings"]
-        )
-        _start_font_bootstrap_task = _unwrap(namespace["_start_font_bootstrap_task"])
-        _ensure_render_fonts = _unwrap(namespace["_ensure_render_fonts"])
-        _wait_for_font_bootstrap = _unwrap(namespace["_wait_for_font_bootstrap"])
-        _target_account_name = _unwrap(namespace["_target_account_name"])
-        _format_created_at = _unwrap(namespace["_format_created_at"])
-        _build_tweet_display_lines = _unwrap(namespace["_build_tweet_display_lines"])
-        _build_notification_message = _unwrap(namespace["_build_notification_message"])
-        _build_text_message_chain = _unwrap(namespace["_build_text_message_chain"])
-        _build_tweet_image_message_chain = _unwrap(
-            namespace["_build_tweet_image_message_chain"]
-        )
-        _build_render_options = _unwrap(namespace["_build_render_options"])
-        _cached_avatar_image_source = _unwrap(namespace["_cached_avatar_image_source"])
-        _render_tweet_to_base64 = _unwrap(namespace["_render_tweet_to_base64"])
-        _send_text_fallback = _unwrap(namespace["_send_text_fallback"])
-        notify_subscribers = _unwrap(namespace["notify_subscribers"])
-        _ensure_target_avatar_cached = _unwrap(
-            namespace["_ensure_target_avatar_cached"]
-        )
-        _fetch_profile_picture_url = _unwrap(namespace["_fetch_profile_picture_url"])
-        _extract_profile_picture_url = staticmethod(
-            _unwrap(namespace["_extract_profile_picture_url"])
-        )
-        _download_avatar_bytes = _unwrap(namespace["_download_avatar_bytes"])
-        _is_valid_avatar_url = staticmethod(_unwrap(namespace["_is_valid_avatar_url"]))
-        _store_tweets_history = _unwrap(namespace["_store_tweets_history"])
-        _normalize_history_short_id = staticmethod(
-            _unwrap(namespace["_normalize_history_short_id"])
-        )
-        _parse_x_command = staticmethod(_unwrap(namespace["_parse_x_command"]))
-        _summarize_history_text = staticmethod(
-            _unwrap(namespace["_summarize_history_text"])
-        )
-        _build_history_list_message = _unwrap(namespace["_build_history_list_message"])
-        _render_history_record_to_base64 = _unwrap(
-            namespace["_render_history_record_to_base64"]
-        )
-        _history_record_account = _unwrap(namespace["_history_record_account"])
-        _ensure_history_record_avatar_cached = _unwrap(
-            namespace["_ensure_history_record_avatar_cached"]
-        )
-        get_latest_tweet_command = _unwrap(namespace["get_latest_tweet_command"])
-        get_history_command = _unwrap(namespace["get_history_command"])
-        render_history_tweet_command = _unwrap(
-            namespace["render_history_tweet_command"]
-        )
-        check_for_new_tweets = _unwrap(namespace["check_for_new_tweets"])
+    return CommandService(
+        runtime_config=runtime_config,
+        config=config,
+        base_dir=REPO_ROOT,
+        twitter_client=twitter_client or FakeTwitterClient(),
+        history_service=history_service,
+        render_service=render_service,
+        message_builder=message_builder,
+        on_config_changed=reload_runtime,
+    )
 
-    return Probe, FakeStarTools, logger
+
+def _notification_sender(
+    *,
+    render_func,
+    subscribe_groups=None,
+    notify_user=None,
+    source_logo=None,
+    group_overrides=None,
+    translation_enabled=False,
+    provider_id="provider-1",
+    translate_func=None,
+    fail_image_for_groups=None,
+    fail_source_for_groups=None,
+):
+    calls = []
+    fail_image_for_groups = set(fail_image_for_groups or [])
+    fail_source_for_groups = set(fail_source_for_groups or [])
+
+    async def send_message(*, type, id, message_chain):
+        calls.append({"type": type, "id": id, "message_chain": message_chain})
+        if id in fail_image_for_groups and message_chain.has_operation("base64_image"):
+            raise RuntimeError("image send failed")
+        if id in fail_source_for_groups and not message_chain.has_operation(
+            "base64_image"
+        ):
+            if message_chain.operations == [("message", "source breaks")]:
+                raise RuntimeError("source send failed")
+
+    if translate_func is None:
+
+        async def translate_func(*args, **kwargs):
+            return None
+
+    sender = NotificationSender(
+        subscribe_groups=subscribe_groups or ["group-1"],
+        target_account="Blue_ArchiveJP",
+        render_service=RenderService(source_logo=source_logo, render_func=render_func),
+        translation_service=TranslationService(
+            context=object(),
+            enabled=translation_enabled,
+            provider_id=provider_id,
+            system_prompt="默认翻译提示",
+            translate_func=translate_func,
+        ),
+        message_builder=MessageBuilder(
+            target_account="Blue_ArchiveJP",
+            notify_user=notify_user,
+            chain_factory=FakeMessageChain,
+        ),
+        send_message=send_message,
+        render_options_for_group=lambda group_id: (group_overrides or {}).get(group_id),
+    )
+    return sender, calls
 
 
 class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
     def test_installed_message_chain_base64_image_component_shape(self) -> None:
         source_path = next(
             (
-                Path(entry)
-                / "astrbot"
-                / "core"
-                / "message"
-                / "message_event_result.py"
+                Path(entry) / "astrbot" / "core" / "message" / "message_event_result.py"
                 for entry in sys.path
                 if (
                     Path(entry)
@@ -366,187 +316,313 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Image.fromBase64(base64_str)", source)
 
     async def test_notify_subscribers_sends_base64_image_with_mention(self) -> None:
-        Probe, StarTools, _logger = _build_probe(
-            lambda tweet, options=None: f"png-{tweet['id']}"
+        sender, calls = _notification_sender(
+            render_func=lambda tweet, options=None: f"png-{tweet['id']}",
+            notify_user="user-9",
         )
-        probe = Probe()
-        probe.subscribe_groups = ["group-1"]
-        probe.notify_user = "user-9"
-        probe.target_account = "Blue_ArchiveJP"
+        tweet = _tweet("2059522313964679235", "hello\nworld")
+        tweet["media"] = [{"media_url_https": "https://pbs.twimg.com/media/a.jpg"}]
+        expected_short_id = TweetHistoryStore.hash_text(tweet["text"])[1]
 
-        await probe.notify_subscribers([_tweet("1", "hello")])
+        debug = await sender.notify([_stored_tweet(tweet)])
 
-        self.assertEqual(len(StarTools.calls), 1)
-        call = StarTools.calls[0]
-        self.assertEqual(call["type"], "GroupMessage")
-        self.assertEqual(call["id"], "group-1")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["type"], "GroupMessage")
+        self.assertEqual(calls[0]["id"], "group-1")
         self.assertEqual(
-            call["message_chain"].operations,
-            [("at", "user-9", "user-9"), ("base64_image", "png-1")],
+            calls[0]["message_chain"].operations,
+            [
+                ("at", "user-9", "user-9"),
+                ("message", f"#{expected_short_id}"),
+                ("base64_image", "png-2059522313964679235"),
+            ],
         )
+        self.assertEqual(
+            calls[1]["message_chain"].operations,
+            [
+                ("message", "hello\nworld"),
+                ("url_image", "https://pbs.twimg.com/media/a.jpg"),
+            ],
+        )
+        self.assertEqual(debug.results[0].short_id, expected_short_id)
+        self.assertEqual(debug.results[0].render_status, "success")
+        self.assertEqual(debug.results[0].image_send.status, "success")
+        self.assertEqual(debug.results[0].source_send.status, "success")
 
-    async def test_notify_subscribers_passes_source_logo_to_renderer(self) -> None:
+    async def test_render_service_passes_source_logo_to_renderer(self) -> None:
         captured_options = []
 
         def render(tweet, options=None):
             captured_options.append(options)
             return f"png-{tweet['id']}"
 
-        Probe, StarTools, _logger = _build_probe(render)
-        probe = Probe()
-        probe.subscribe_groups = ["group-1"]
-        probe.notify_user = None
-        probe.target_account = "Blue_ArchiveJP"
-        probe.source_logo = "/tmp/xmonitor-source-logo.png"
+        service = RenderService(
+            source_logo="/tmp/xmonitor-source-logo.png", render_func=render
+        )
 
-        await probe.notify_subscribers([_tweet("1", "hello")])
+        await service.render_tweet_to_base64(_tweet("1", "hello"))
 
-        self.assertEqual(len(StarTools.calls), 1)
         self.assertEqual(
             captured_options,
             [{"source_logo": "/tmp/xmonitor-source-logo.png"}],
         )
 
-    async def test_notify_subscribers_prefers_cached_avatar_from_database(self) -> None:
+    async def test_notify_subscribers_applies_group_render_overrides(self) -> None:
         captured_options = []
 
         def render(tweet, options=None):
-            captured_options.append(options)
+            captured_options.append((tweet["id"], options))
             return f"png-{tweet['id']}"
 
-        Probe, StarTools, _logger = _build_probe(render)
-        probe = Probe()
-        probe.subscribe_groups = ["group-1"]
-        probe.notify_user = None
-        probe.target_account = "@Blue_ArchiveJP"
-        probe.source_logo = None
-        probe.history_store = FakeHistoryStore()
-        probe.history_store.avatar_records["blue_archivejp"] = FakeAvatarRecord(
-            account="Blue_ArchiveJP",
-            profile_picture_url="https://pbs.twimg.com/profile_images/avatar.jpg",
-            avatar_base64=base64.b64encode(b"avatar-bytes").decode("ascii"),
+        sender, calls = _notification_sender(
+            render_func=render,
+            subscribe_groups=["group-1", "group-2"],
+            group_overrides={
+                "group-1": {
+                    "avatar": "https://pbs.twimg.com/avatar1.jpg",
+                    "display_name": "群一显示名",
+                    "username": "GroupOne",
+                },
+                "group-2": {
+                    "avatar": "https://pbs.twimg.com/avatar2.jpg",
+                    "display_name": "群二显示名",
+                    "username": "GroupTwo",
+                },
+            },
         )
 
-        await probe.notify_subscribers([_tweet("1", "hello")])
+        await sender.notify([_stored_tweet(_tweet("1", "hello"))])
 
-        self.assertEqual(len(StarTools.calls), 1)
-        self.assertEqual(captured_options, [{"avatar": b"avatar-bytes"}])
-
-    async def test_notify_subscribers_passes_configured_emoji_font_paths(self) -> None:
-        captured_options = []
-
-        def render(tweet, options=None):
-            captured_options.append(options)
-            return f"png-{tweet['id']}"
-
-        Probe, _StarTools, _logger = _build_probe(render)
-        probe = Probe()
-        probe.subscribe_groups = ["group-1"]
-        probe.notify_user = None
-        probe.target_account = ""
-        probe.source_logo = None
-        probe.auto_download_fonts = True
-        probe.font_paths = []
-        probe.bold_font_paths = []
-        probe.emoji_font_paths = ["/fonts/Twemoji.ttf"]
-        probe.auto_font_paths = []
-        probe.auto_bold_font_paths = []
-        probe.auto_emoji_font_paths = ["/data/fonts/NotoColorEmoji.ttf"]
-
-        await probe.notify_subscribers([_tweet("1", "hello")])
-
+        self.assertEqual(len(calls), 4)
         self.assertEqual(
             captured_options,
             [
-                {
-                    "emoji_font_paths": [
-                        "/fonts/Twemoji.ttf",
-                        "/data/fonts/NotoColorEmoji.ttf",
-                    ]
-                }
+                (
+                    "1",
+                    {
+                        "avatar": "https://pbs.twimg.com/avatar1.jpg",
+                        "display_name": "群一显示名",
+                        "username": "GroupOne",
+                    },
+                ),
+                (
+                    "1",
+                    {
+                        "avatar": "https://pbs.twimg.com/avatar2.jpg",
+                        "display_name": "群二显示名",
+                        "username": "GroupTwo",
+                    },
+                ),
             ],
         )
 
-    async def test_ensure_target_avatar_cached_fetches_user_info_and_saves_base64(
+    async def test_auto_translation_is_disabled_by_default(self) -> None:
+        async def translate_func(*args, **kwargs):
+            raise AssertionError("translation should not be called")
+
+        sender, calls = _notification_sender(
+            render_func=lambda tweet, options=None: "png",
+            translate_func=translate_func,
+        )
+
+        await sender.notify([_stored_tweet(_tweet("1", "hello"))])
+
+        self.assertEqual(len(calls), 2)
+
+    async def test_auto_translation_renders_translated_text_once_per_tweet(
         self,
     ) -> None:
-        class Response:
-            def raise_for_status(self) -> None:
-                return None
+        captured_options = []
+        translated_tweets = []
 
-            def json(self) -> dict:
-                return {
-                    "status": "success",
-                    "data": {
-                        "profilePicture": "https://pbs.twimg.com/profile_images/a.jpg"
-                    },
-                }
+        def render(tweet, options=None):
+            captured_options.append(options)
+            return f"png-{tweet['id']}"
 
-        class Client:
-            def __init__(self) -> None:
-                self.calls = []
+        async def translate_func(context, *, chat_provider_id, tweet, system_prompt):
+            translated_tweets.append(tweet["id"])
+            return f"译文 {tweet['id']}"
 
-            async def get(self, url, *, headers, params):
-                self.calls.append((url, headers, params))
-                return Response()
+        sender, calls = _notification_sender(
+            render_func=render,
+            subscribe_groups=["group-1", "group-2"],
+            translation_enabled=True,
+            translate_func=translate_func,
+        )
 
-        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
-        probe = Probe()
-        probe.api_key = "secret"
-        probe.target_account = "@Blue_ArchiveJP"
-        probe.history_store = FakeHistoryStore()
-        downloaded_urls = []
+        await sender.notify([_stored_tweet(_tweet("1", "hello"))])
 
-        async def download(profile_picture_url):
-            downloaded_urls.append(profile_picture_url)
-            return b"avatar-bytes"
-
-        probe._download_avatar_bytes = download
-        client = Client()
-
-        await probe._ensure_target_avatar_cached(client)
-
+        self.assertEqual(translated_tweets, ["1"])
+        self.assertEqual(len(calls), 4)
         self.assertEqual(
-            client.calls,
+            captured_options,
             [
-                (
-                    probe.TWITTER_USER_INFO_URL,
-                    {"X-API-Key": "secret"},
-                    {"userName": "Blue_ArchiveJP"},
-                )
+                {"text_override": "译文 1", "translation_style": True},
+                {"text_override": "译文 1", "translation_style": True},
             ],
         )
-        self.assertEqual(downloaded_urls, ["https://pbs.twimg.com/profile_images/a.jpg"])
-        self.assertEqual(len(probe.history_store.avatar_saves), 1)
-        saved = probe.history_store.avatar_saves[0]
-        self.assertEqual(saved.account, "Blue_ArchiveJP")
+        self.assertEqual(calls[1]["message_chain"].operations, [("message", "hello")])
+        self.assertEqual(calls[3]["message_chain"].operations, [("message", "hello")])
+
+    async def test_auto_translation_failure_falls_back_to_original_render(self) -> None:
+        captured_options = []
+
+        def render(tweet, options=None):
+            captured_options.append(options)
+            return f"png-{tweet['id']}"
+
+        async def translate_func(context, *, chat_provider_id, tweet, system_prompt):
+            return None
+
+        sender, calls = _notification_sender(
+            render_func=render,
+            translation_enabled=True,
+            translate_func=translate_func,
+        )
+
+        debug = await sender.notify([_stored_tweet(_tweet("1", "hello"))])
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(captured_options, [None])
+        self.assertEqual(debug.results[0].translation_status, "empty")
+
+    async def test_config_translation_command_persists_switch(self) -> None:
+        config = _runtime_config()
+        service = _command_service(config=config)
+
+        enabled = await service.handle_xmonitor_config(
+            FakeEvent("/xmonitor config translation on", group_id="group-1"),
+            parse_xmonitor_args("/xmonitor config translation on"),
+        )
+
+        self.assertEqual(enabled, "定时推送自动翻译已开启。")
+        self.assertTrue(config["ENABLE_AUTO_TRANSLATION"])
+        self.assertTrue(service.runtime_config.auto_translation_enabled)
+        self.assertEqual(config.save_count, 1)
+
+        disabled = await service.handle_xmonitor_config(
+            FakeEvent("/xmonitor config translation off", group_id="group-1"),
+            parse_xmonitor_args("/xmonitor config translation off"),
+        )
+
+        self.assertEqual(disabled, "定时推送自动翻译已关闭。")
+        self.assertFalse(config["ENABLE_AUTO_TRANSLATION"])
+        self.assertFalse(service.runtime_config.auto_translation_enabled)
+        self.assertEqual(config.save_count, 2)
+
+    async def test_runtime_config_preserves_minute_interval(self) -> None:
+        config = _runtime_config(CHECK_INTERVAL=600)
+
+        runtime_config = load_runtime_config(config, base_dir=REPO_ROOT)
+
+        self.assertEqual(runtime_config.check_interval_minutes, 600)
+        self.assertEqual(config["CHECK_INTERVAL"], 600)
+        self.assertEqual(config.save_count, 0)
+
+    async def test_config_status_reports_current_group_override(self) -> None:
+        config = _runtime_config(
+            ENABLE_AUTO_TRANSLATION=True,
+            TRANSLATION_PROVIDER_ID="provider-1",
+            GROUP_RENDER_OVERRIDES={
+                "group-1": {
+                    "display_name": "群名",
+                    "username": "group_user",
+                    "avatar": "https://pbs.twimg.com/avatar.jpg",
+                }
+            },
+        )
+        runtime_config = load_runtime_config(config, base_dir=REPO_ROOT)
+
+        result = build_config_status_message(runtime_config, "group-1")
+
+        self.assertIn("自动翻译：开启", result)
+        self.assertIn("翻译 Provider：provider-1", result)
+        self.assertIn("当前群 group-1：群名 / @group_user / 头像已配置", result)
+
+    async def test_config_identity_command_updates_group_override(self) -> None:
+        config = _runtime_config()
+        service = _command_service(config=config)
+
+        result = await service.handle_xmonitor_config(
+            FakeEvent("/xmonitor config identity group-1 群渲染名 group_user"),
+            parse_xmonitor_args(
+                "/xmonitor config identity group-1 群渲染名 group_user"
+            ),
+        )
+
+        self.assertIn("已为群 group-1 配置显示身份", result)
         self.assertEqual(
-            saved.avatar_base64,
-            base64.b64encode(b"avatar-bytes").decode("ascii"),
+            config["GROUP_RENDER_OVERRIDES"]["group-1"],
+            {"display_name": "群渲染名", "username": "group_user"},
+        )
+        self.assertEqual(config.save_count, 1)
+
+    async def test_config_avatar_current_fetches_profile_picture(self) -> None:
+        config = _runtime_config()
+        service = _command_service(
+            config=config,
+            twitter_client=FakeTwitterClient(
+                profile={
+                    "name": "Blue Archive",
+                    "userName": "Blue_ArchiveJP",
+                    "profilePicture": "https://pbs.twimg.com/profile.jpg",
+                }
+            ),
         )
 
-    async def test_ensure_target_avatar_cached_skips_existing_avatar(self) -> None:
-        class Client:
-            calls = []
-
-            async def get(self, url, *, headers, params):
-                self.calls.append((url, headers, params))
-                raise AssertionError("user/info should not be called")
-
-        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
-        probe = Probe()
-        probe.api_key = "secret"
-        probe.target_account = "Blue_ArchiveJP"
-        probe.history_store = FakeHistoryStore()
-        probe.history_store.avatar_records["blue_archivejp"] = FakeAvatarRecord(
-            account="Blue_ArchiveJP",
-            profile_picture_url="https://pbs.twimg.com/profile_images/a.jpg",
-            avatar_base64="YXZhdGFy",
+        result = await service.handle_xmonitor_config(
+            FakeEvent(
+                "/xmonitor config avatar current Blue_ArchiveJP", group_id="group-1"
+            ),
+            parse_xmonitor_args("/xmonitor config avatar current Blue_ArchiveJP"),
         )
 
-        await probe._ensure_target_avatar_cached(Client())
+        self.assertIn("已为群 group-1 配置头像", result)
+        self.assertEqual(
+            config["GROUP_RENDER_OVERRIDES"]["group-1"],
+            {
+                "user_name": "Blue_ArchiveJP",
+                "display_name": "Blue Archive",
+                "username": "Blue_ArchiveJP",
+                "avatar": "https://pbs.twimg.com/profile.jpg",
+            },
+        )
+        self.assertEqual(config.save_count, 1)
 
-        self.assertEqual(probe.history_store.avatar_saves, [])
+    async def test_config_avatar_failure_does_not_overwrite_old_profile(self) -> None:
+        existing = {
+            "group-1": {
+                "display_name": "旧名",
+                "username": "old_user",
+                "avatar": "https://pbs.twimg.com/old.jpg",
+            }
+        }
+        config = _runtime_config(GROUP_RENDER_OVERRIDES=existing.copy())
+        service = _command_service(
+            config=config,
+            twitter_client=FakeTwitterClient(
+                profile_error=RuntimeError("用户资料缺少 profilePicture")
+            ),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "用户资料缺少 profilePicture"):
+            await service.handle_xmonitor_config(
+                FakeEvent("/xmonitor config avatar group-1 BrokenUser"),
+                parse_xmonitor_args("/xmonitor config avatar group-1 BrokenUser"),
+            )
+
+        self.assertEqual(config["GROUP_RENDER_OVERRIDES"], existing)
+        self.assertEqual(config.save_count, 0)
+
+    async def test_config_avatar_current_requires_group_chat(self) -> None:
+        service = _command_service()
+
+        result = await service.handle_xmonitor_config(
+            FakeEvent("/xmonitor config avatar current Blue_ArchiveJP"),
+            parse_xmonitor_args("/xmonitor config avatar current Blue_ArchiveJP"),
+        )
+
+        self.assertEqual(result, "当前会话不是群聊，请显式传入 group_id。")
 
     async def test_render_failure_falls_back_to_text_and_continues(self) -> None:
         def render(tweet, options=None):
@@ -554,133 +630,123 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
                 raise RuntimeError("render boom")
             return f"png-{tweet['id']}"
 
-        Probe, StarTools, _logger = _build_probe(render)
-        probe = Probe()
-        probe.subscribe_groups = ["group-1"]
-        probe.notify_user = None
-        probe.target_account = "Blue_ArchiveJP"
+        sender, calls = _notification_sender(render_func=render)
 
-        await probe.notify_subscribers(
-            [_tweet("bad", "bad tweet"), _tweet("good", "good tweet")]
+        debug = await sender.notify(
+            [
+                _stored_tweet(_tweet("bad", "bad tweet")),
+                _stored_tweet(_tweet("good", "good tweet")),
+            ]
         )
 
-        self.assertEqual(len(StarTools.calls), 2)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(calls[0]["message_chain"].operations[0][0], "message")
+        self.assertIn("bad tweet", calls[0]["message_chain"].operations[0][1])
         self.assertEqual(
-            StarTools.calls[0]["message_chain"].operations[0][0], "message"
+            calls[1]["message_chain"].operations, [("message", "bad tweet")]
         )
-        self.assertIn("bad tweet", StarTools.calls[0]["message_chain"].operations[0][1])
         self.assertEqual(
-            StarTools.calls[1]["message_chain"].operations,
-            [("base64_image", "png-good")],
+            calls[2]["message_chain"].operations,
+            [
+                ("message", f"#{TweetHistoryStore.hash_text('good tweet')[1]}"),
+                ("base64_image", "png-good"),
+            ],
         )
+        self.assertEqual(
+            calls[3]["message_chain"].operations, [("message", "good tweet")]
+        )
+        self.assertEqual(debug.results[0].render_status, "error")
+        self.assertEqual(debug.results[0].fallback_send.status, "success")
 
     async def test_image_send_failure_falls_back_per_group(self) -> None:
-        Probe, StarTools, _logger = _build_probe(
-            lambda tweet, options=None: f"png-{tweet['id']}",
+        sender, calls = _notification_sender(
+            render_func=lambda tweet, options=None: f"png-{tweet['id']}",
+            subscribe_groups=["group-1", "group-2"],
+            notify_user="user-9",
             fail_image_for_groups={"group-1"},
         )
-        probe = Probe()
-        probe.subscribe_groups = ["group-1", "group-2"]
-        probe.notify_user = "user-9"
-        probe.target_account = "Blue_ArchiveJP"
 
-        await probe.notify_subscribers([_tweet("1", "fallback please")])
+        debug = await sender.notify([_stored_tweet(_tweet("1", "fallback please"))])
 
-        self.assertEqual(len(StarTools.calls), 3)
-        self.assertEqual(StarTools.calls[0]["id"], "group-1")
-        self.assertTrue(
-            StarTools.calls[0]["message_chain"].has_operation("base64_image")
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(calls[0]["id"], "group-1")
+        self.assertTrue(calls[0]["message_chain"].has_operation("base64_image"))
+        self.assertEqual(calls[1]["id"], "group-1")
+        self.assertTrue(calls[1]["message_chain"].has_operation("message"))
+        self.assertEqual(calls[2]["id"], "group-1")
+        self.assertEqual(
+            calls[2]["message_chain"].operations, [("message", "fallback please")]
         )
-        self.assertEqual(StarTools.calls[1]["id"], "group-1")
-        self.assertTrue(StarTools.calls[1]["message_chain"].has_operation("message"))
-        self.assertEqual(StarTools.calls[2]["id"], "group-2")
-        self.assertTrue(
-            StarTools.calls[2]["message_chain"].has_operation("base64_image")
+        self.assertEqual(calls[3]["id"], "group-2")
+        self.assertTrue(calls[3]["message_chain"].has_operation("base64_image"))
+        self.assertEqual(calls[4]["id"], "group-2")
+        self.assertEqual(
+            calls[4]["message_chain"].operations, [("message", "fallback please")]
         )
+        self.assertEqual(debug.results[0].image_send.status, "error")
+        self.assertEqual(debug.results[0].fallback_send.status, "success")
+        self.assertEqual(debug.results[0].source_send.status, "success")
+
+    async def test_source_message_failure_is_recorded_and_does_not_raise(self) -> None:
+        sender, calls = _notification_sender(
+            render_func=lambda tweet, options=None: f"png-{tweet['id']}",
+            fail_source_for_groups={"group-1"},
+        )
+
+        debug = await sender.notify([_stored_tweet(_tweet("1", "source breaks"))])
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(debug.results[0].source_send.status, "error")
 
     def test_parse_x_command_preserves_translation_text(self) -> None:
-        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
-
-        short_id, translation = Probe._parse_x_command(
+        short_id, translation = parse_x_command(
             "/x 114514 翻译正文 https://example.test\n#测试 😀"
         )
 
         self.assertEqual(short_id, "114514")
         self.assertEqual(translation, "翻译正文 https://example.test\n#测试 😀")
 
+    def test_event_group_id_accepts_method_and_message_object(self) -> None:
+        self.assertEqual(event_group_id(FakeEvent(group_id="group-1")), "group-1")
+
+        class MessageObj:
+            group_id = "group-2"
+
+        class EventWithoutMethod:
+            message_obj = MessageObj()
+
+        self.assertEqual(event_group_id(EventWithoutMethod()), "group-2")
+
     async def test_manual_fetch_records_history_before_reply(self) -> None:
-        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
-        probe = Probe()
-        probe.target_account = "Blue_ArchiveJP"
-        probe.check_interval_minutes = 10
-        probe.history_store = FakeHistoryStore()
-
-        async def fetch():
-            return [_tweet("1", "manual tweet")]
-
-        probe._fetch_new_tweets = fetch
-
-        results = await _collect_async(
-            probe.get_latest_tweet_command(FakeEvent("new"))
+        history_store = FakeHistoryStore()
+        service = _command_service(
+            history_store=history_store,
+            twitter_client=FakeTwitterClient(tweets=[_tweet("1", "manual tweet")]),
         )
 
-        self.assertEqual(len(probe.history_store.added), 1)
-        self.assertEqual(probe.history_store.added[0][1], "Blue_ArchiveJP")
-        self.assertEqual(results[0][0], "plain")
-        self.assertIn("manual tweet", results[0][1])
+        result = await service.handle_manual_fetch()
 
-    async def test_scheduled_fetch_records_history_before_notify(self) -> None:
-        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
-        probe = Probe()
-        probe.target_account = "Blue_ArchiveJP"
-        probe.check_interval_minutes = 10
-        probe.history_store = FakeHistoryStore()
-        notified = []
+        self.assertEqual(len(history_store.added), 1)
+        self.assertEqual(history_store.added[0][1], "Blue_ArchiveJP")
+        self.assertIn("manual tweet", result)
 
-        async def fetch():
-            return [_tweet("1", "scheduled tweet")]
-
-        async def notify(tweets):
-            notified.append(list(tweets))
-
-        probe._fetch_new_tweets = fetch
-        probe.notify_subscribers = notify
-
-        await probe.check_for_new_tweets()
-
-        self.assertEqual(len(probe.history_store.added), 1)
-        self.assertEqual(notified, [[_tweet("1", "scheduled tweet")]])
-
-    async def test_scheduled_fetch_keeps_job_alive_when_notify_raises(self) -> None:
-        Probe, _StarTools, logger = _build_probe(lambda tweet, options=None: "png")
-        probe = Probe()
-        probe.target_account = "Blue_ArchiveJP"
-        probe.check_interval_minutes = 10
-        probe.history_store = FakeHistoryStore()
-
-        async def fetch():
-            return [_tweet("1", "scheduled tweet")]
-
-        async def notify(tweets):
-            raise RuntimeError("notify exploded")
-
-        probe._fetch_new_tweets = fetch
-        probe.notify_subscribers = notify
-
-        await probe.check_for_new_tweets()
-
-        self.assertEqual(len(probe.history_store.added), 1)
-        self.assertTrue(
-            any("通知阶段失败" in message for message in logger.errors),
-            logger.errors,
+    async def test_history_service_records_new_and_skips_duplicates(self) -> None:
+        existing_tweet = _tweet("1", "already stored")
+        existing_record = FakeHistoryRecord(
+            short_id=TweetHistoryStore.hash_text(existing_tweet["text"])[1],
+            original_text=existing_tweet["text"],
+            tweet=existing_tweet,
         )
-        self.assertFalse(
-            any("计划任务 'check_for_new_tweets' 失败" in message for message in logger.errors),
-            logger.errors,
-        )
+        store = FakeHistoryStore([existing_record])
+        service = HistoryService(store, account="Blue_ArchiveJP")
+
+        stored = service.store_new_tweets([existing_tweet, _tweet("2", "new tweet")])
+
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0].tweet["text"], "new tweet")
+        self.assertEqual(len(store.added), 1)
 
     async def test_history_command_lists_latest_records(self) -> None:
-        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
         first = FakeHistoryRecord(
             short_id="aaaaaa",
             original_text="older text",
@@ -693,14 +759,12 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
             tweet=_tweet("2", "newer text"),
             created_at="2024-05-01 09:02:00",
         )
-        probe = Probe()
-        probe.history_store = FakeHistoryStore([second, first])
+        service = _command_service(history_store=FakeHistoryStore([second, first]))
 
-        results = await _collect_async(probe.get_history_command(FakeEvent("history")))
+        result = service.handle_history(limit=10)
 
-        self.assertEqual(results[0][0], "plain")
-        self.assertIn("#bbbbbb", results[0][1])
-        self.assertLess(results[0][1].index("#bbbbbb"), results[0][1].index("#aaaaaa"))
+        self.assertIn("#bbbbbb", result)
+        self.assertLess(result.index("#bbbbbb"), result.index("#aaaaaa"))
 
     async def test_x_command_renders_original_history_tweet_as_image(self) -> None:
         captured = []
@@ -709,109 +773,24 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
             captured.append((tweet, options))
             return f"png-{tweet['id']}"
 
-        Probe, _StarTools, _logger = _build_probe(render)
         record = FakeHistoryRecord(
             short_id="114514",
             original_text="original tweet",
             tweet=_tweet("1", "original tweet"),
         )
-        probe = Probe()
-        probe.source_logo = "/tmp/source-logo.png"
-        probe.history_store = FakeHistoryStore([record])
-
-        results = await _collect_async(
-            probe.render_history_tweet_command(FakeEvent("/x 114514"))
+        config = _runtime_config(SOURCE_LOGO="/tmp/source-logo.png")
+        service = _command_service(
+            config=config,
+            history_store=FakeHistoryStore([record]),
+            render_func=render,
         )
 
+        result = await service.handle_render_history("/x 114514")
+
+        self.assertEqual(result.image_base64, "png-1")
         self.assertEqual(
-            results[0].operations,
-            [("base64_image", "png-1")],
+            captured, [(record.tweet, {"source_logo": "/tmp/source-logo.png"})]
         )
-        self.assertEqual(captured, [(record.tweet, {"source_logo": "/tmp/source-logo.png"})])
-
-    async def test_x_command_uses_cached_history_account_avatar(self) -> None:
-        captured = []
-
-        def render(tweet, options=None):
-            captured.append((tweet, options))
-            return f"png-{tweet['id']}"
-
-        Probe, _StarTools, _logger = _build_probe(render)
-        record = FakeHistoryRecord(
-            short_id="114514",
-            original_text="original tweet",
-            tweet=_tweet("1", "original tweet"),
-            account="@Blue_ArchiveJP",
-        )
-        probe = Probe()
-        probe.source_logo = None
-        probe.history_store = FakeHistoryStore([record])
-        probe.history_store.avatar_records["blue_archivejp"] = FakeAvatarRecord(
-            account="Blue_ArchiveJP",
-            profile_picture_url="https://pbs.twimg.com/profile_images/avatar.jpg",
-            avatar_base64=base64.b64encode(b"avatar-bytes").decode("ascii"),
-        )
-
-        results = await _collect_async(
-            probe.render_history_tweet_command(FakeEvent("/x 114514"))
-        )
-
-        self.assertEqual(results[0].operations, [("base64_image", "png-1")])
-        self.assertEqual(captured, [(record.tweet, {"avatar": b"avatar-bytes"})])
-        self.assertEqual(probe.history_store.avatar_saves, [])
-
-    async def test_x_command_fetches_missing_history_account_avatar_before_render(
-        self,
-    ) -> None:
-        captured = []
-
-        def render(tweet, options=None):
-            captured.append((tweet, options))
-            return f"png-{tweet['id']}"
-
-        Probe, _StarTools, _logger = _build_probe(render)
-        record = FakeHistoryRecord(
-            short_id="114514",
-            original_text="original tweet",
-            tweet=_tweet("1", "original tweet"),
-            account="Blue_ArchiveJP",
-        )
-        probe = Probe()
-        probe.api_key = "secret"
-        probe.source_logo = None
-        probe.history_store = FakeHistoryStore([record])
-        fetched_accounts = []
-        downloaded_urls = []
-
-        async def fetch_profile_picture_url(client, account):
-            fetched_accounts.append(account)
-            return "https://pbs.twimg.com/profile_images/avatar.jpg"
-
-        async def download_avatar_bytes(profile_picture_url):
-            downloaded_urls.append(profile_picture_url)
-            return b"avatar-bytes"
-
-        probe._fetch_profile_picture_url = fetch_profile_picture_url
-        probe._download_avatar_bytes = download_avatar_bytes
-
-        results = await _collect_async(
-            probe.render_history_tweet_command(FakeEvent("/x 114514"))
-        )
-
-        self.assertEqual(results[0].operations, [("base64_image", "png-1")])
-        self.assertEqual(fetched_accounts, ["Blue_ArchiveJP"])
-        self.assertEqual(
-            downloaded_urls,
-            ["https://pbs.twimg.com/profile_images/avatar.jpg"],
-        )
-        self.assertEqual(len(probe.history_store.avatar_saves), 1)
-        saved = probe.history_store.avatar_saves[0]
-        self.assertEqual(saved.account, "Blue_ArchiveJP")
-        self.assertEqual(
-            saved.avatar_base64,
-            base64.b64encode(b"avatar-bytes").decode("ascii"),
-        )
-        self.assertEqual(captured, [(record.tweet, {"avatar": b"avatar-bytes"})])
 
     async def test_x_command_renders_translation_with_original_assets(self) -> None:
         captured = []
@@ -820,23 +799,21 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
             captured.append((tweet, options))
             return "png-translated"
 
-        Probe, _StarTools, _logger = _build_probe(render)
         record = FakeHistoryRecord(
             short_id="114514",
             original_text="original tweet",
             tweet=_tweet("1", "original tweet"),
         )
-        probe = Probe()
-        probe.source_logo = None
-        probe.history_store = FakeHistoryStore([record])
-
-        results = await _collect_async(
-            probe.render_history_tweet_command(
-                FakeEvent("/x 114514 翻译正文 https://example.test\n#测试 😀")
-            )
+        service = _command_service(
+            history_store=FakeHistoryStore([record]),
+            render_func=render,
         )
 
-        self.assertEqual(results[0].operations, [("base64_image", "png-translated")])
+        result = await service.handle_render_history(
+            "/x 114514 翻译正文 https://example.test\n#测试 😀"
+        )
+
+        self.assertEqual(result.image_base64, "png-translated")
         self.assertEqual(captured[0][0], record.tweet)
         self.assertEqual(
             captured[0][1],
@@ -846,24 +823,20 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def test_x_command_returns_clear_not_found_and_collision_messages(self) -> None:
-        Probe, _StarTools, _logger = _build_probe(lambda tweet, options=None: "png")
-        probe = Probe()
-        probe.history_store = FakeHistoryStore()
+    async def test_x_command_returns_clear_not_found_and_collision_messages(
+        self,
+    ) -> None:
+        history_store = FakeHistoryStore()
+        service = _command_service(history_store=history_store)
 
-        missing = await _collect_async(
-            probe.render_history_tweet_command(FakeEvent("/x 114514"))
-        )
+        missing = await service.handle_render_history("/x 114514")
 
-        self.assertEqual(missing[0][0], "plain")
-        self.assertIn("未找到 #114514", missing[0][1])
+        self.assertIn("未找到 #114514", missing.text)
 
-        probe.history_store.lookup_error = TweetHistoryLookupCollision("短 ID 冲突")
-        collided = await _collect_async(
-            probe.render_history_tweet_command(FakeEvent("/x 114514"))
-        )
+        history_store.lookup_error = TweetHistoryLookupCollision("短 ID 冲突")
+        collided = await service.handle_render_history("/x 114514")
 
-        self.assertEqual(collided[0], ("plain", "短 ID 冲突"))
+        self.assertEqual(collided.text, "短 ID 冲突")
 
 
 if __name__ == "__main__":

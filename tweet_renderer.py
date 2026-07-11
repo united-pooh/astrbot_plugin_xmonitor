@@ -48,22 +48,8 @@ DEFAULT_ACTION_ICON_GAP = 18
 DEFAULT_ACTION_ICON_TOP_OFFSET = 4
 DEFAULT_VERIFIED_BADGE_SIZE = 26
 DEFAULT_BADGE_GAP = 6
-DEFAULT_EMOJI_LINE_PADDING = 6
-EMOJI_VARIATION_SELECTORS = {0xFE0E, 0xFE0F}
-EMOJI_MODIFIER_RANGE = range(0x1F3FB, 0x1F400)
-REGIONAL_INDICATOR_RANGE = range(0x1F1E6, 0x1F200)
 GOLD = (226, 183, 25)
 DARK_BADGE = (15, 20, 25)
-TEXT_GLYPH_COMPATIBILITY_MAP = str.maketrans(
-    {
-        "\u301c": "\uff5e",
-    }
-)
-CJK_FONT_SAMPLE = "汉語あ维護翻訳"
-MISSING_CJK_FONT_MESSAGE = (
-    "未找到可渲染中日韩字符的字体。请安装 Noto Sans CJK/Source Han Sans/"
-    "WenQuanYi 等字体，或在插件配置 FONT_PATHS 中指定字体文件路径。"
-)
 
 
 @dataclass(frozen=True)
@@ -101,18 +87,17 @@ def render_image(
     source_logo_position = _source_logo_position(options)
     body_tweet = _tweet_for_body_text(tweet, options)
     text_segments = _parse_rich_text(body_tweet)
-    line_height = _line_height(
-        fonts["body"], int(options.get("body_line_padding", DEFAULT_BODY_LINE_PADDING))
-    )
     text_lines = _wrap_segments(
         draw,
         text_segments,
         fonts["body"],
         main_width,
         emoji_font=fonts.get("emoji"),
-        line_height=line_height,
     )
 
+    line_height = _line_height(
+        fonts["body"], int(options.get("body_line_padding", DEFAULT_BODY_LINE_PADDING))
+    )
     text_height = max(1, len(text_lines)) * line_height
     footer_height = _line_height(fonts["footer"], 8)
     source_logo_size: tuple[int, int] | None = None
@@ -143,8 +128,8 @@ def render_image(
     )
 
     y = margin
-    text_y = y + header_height + int(
-        options.get("text_header_gap", DEFAULT_TEXT_HEADER_GAP)
+    text_y = (
+        y + header_height + int(options.get("text_header_gap", DEFAULT_TEXT_HEADER_GAP))
     )
 
     cursor_y = text_y + text_height
@@ -181,7 +166,6 @@ def render_image(
         fonts["body"],
         line_height,
         emoji_font=fonts.get("emoji"),
-        target_image=image,
     )
 
     if (
@@ -246,22 +230,6 @@ def _load_fonts(options: dict[str, Any]) -> dict[str, Font]:
             "/Library/Fonts/Arial Unicode.ttf",
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-            "/usr/share/fonts/opentype/source-han-sans/SourceHanSans-Regular.ttc",
-            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Regular.otf",
-            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Regular.otf",
-            "/usr/share/fonts/adobe-source-han-sans/SourceHanSansSC-Regular.otf",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "/usr/share/fonts/truetype/arphic/uming.ttc",
-            "/usr/share/fonts/truetype/arphic/ukai.ttc",
-            "C:/Windows/Fonts/msyh.ttc",
-            "C:/Windows/Fonts/msgothic.ttc",
         ]
     )
     bold_font_paths = list(options.get("bold_font_paths") or [])
@@ -272,20 +240,6 @@ def _load_fonts(options: dict[str, Any]) -> dict[str, Font]:
             "/System/Library/Fonts/ヒラギノ角ゴシック W7.ttc",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
             "/Library/Fonts/Arial Bold.ttf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Bold.otf",
-            "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf",
-            "/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc",
-            "/usr/share/fonts/noto-cjk/NotoSansCJK-Bold.ttc",
-            "/usr/share/fonts/opentype/source-han-sans/SourceHanSans-Bold.ttc",
-            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansSC-Bold.otf",
-            "/usr/share/fonts/opentype/source-han-sans/SourceHanSansCN-Bold.otf",
-            "/usr/share/fonts/adobe-source-han-sans/SourceHanSansSC-Bold.otf",
-            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-            "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
-            "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
-            "C:/Windows/Fonts/msyhbd.ttc",
-            "C:/Windows/Fonts/msgothic.ttc",
         ]
     )
     return {
@@ -320,12 +274,6 @@ def _load_emoji_font(size: int, options: dict[str, Any]) -> Font | None:
     emoji_font_paths = list(options.get("emoji_font_paths") or [])
     emoji_font_paths.extend(
         [
-            str(
-                Path(__file__).resolve().parent
-                / "data"
-                / "fonts"
-                / "NotoColorEmoji.ttf"
-            ),
             "/System/Library/Fonts/Apple Color Emoji.ttc",
             "/System/Library/Fonts/Apple Symbols.ttf",
             "/System/Library/Fonts/CJKSymbolsFallback.ttc",
@@ -333,18 +281,7 @@ def _load_emoji_font(size: int, options: dict[str, Any]) -> Font | None:
             "/Library/Fonts/Arial Unicode.ttf",
         ]
     )
-    candidate_sizes = [
-        size,
-        max(size + 1, round(size * 1.18)),
-        40,
-        48,
-        64,
-        96,
-        109,
-        128,
-        136,
-        160,
-    ]
+    candidate_sizes = [size, max(size + 1, round(size * 1.18)), 40, 48, 64, 96, 160]
     for source in emoji_font_paths:
         path = str(source)
         if not path or not Path(path).exists():
@@ -357,12 +294,7 @@ def _load_emoji_font(size: int, options: dict[str, Any]) -> Font | None:
     return None
 
 
-def _load_font(
-    font_paths: list[Any],
-    size: int,
-    *,
-    require_cjk: bool = True,
-) -> Font:
+def _load_font(font_paths: list[Any], size: int) -> Font:
     for source in font_paths:
         index = 0
         if isinstance(source, (list, tuple)):
@@ -378,46 +310,13 @@ def _load_font(
             path = str(source)
         try:
             if path and Path(path).exists():
-                font = ImageFont.truetype(path, size=size, index=index)
-                if not require_cjk or _font_supports_cjk(font):
-                    return font
+                return ImageFont.truetype(path, size=size, index=index)
         except OSError:
             continue
     try:
-        font = ImageFont.truetype("Arial.ttf", size=size)
-        if not require_cjk or _font_supports_cjk(font):
-            return font
+        return ImageFont.truetype("Arial.ttf", size=size)
     except OSError:
-        pass
-    default_font = ImageFont.load_default()
-    if not require_cjk or _font_supports_cjk(default_font):
-        return default_font
-    raise RuntimeError(MISSING_CJK_FONT_MESSAGE)
-
-
-def _font_supports_cjk(font: Font) -> bool:
-    signatures: set[tuple[tuple[int, int, int, int], bytes]] = set()
-    for character in CJK_FONT_SAMPLE:
-        signature = _glyph_bitmap_signature(font, character)
-        if signature is not None:
-            signatures.add(signature)
-    return len(signatures) >= 5
-
-
-def _glyph_bitmap_signature(
-    font: Font,
-    character: str,
-) -> tuple[tuple[int, int, int, int], bytes] | None:
-    image = Image.new("L", (96, 96), 0)
-    draw = ImageDraw.Draw(image)
-    try:
-        draw.text((8, 8), character, font=font, fill=255)
-    except (OSError, UnicodeEncodeError):
-        return None
-    bbox = image.getbbox()
-    if bbox is None:
-        return None
-    return bbox, image.crop(bbox).tobytes()
+        return ImageFont.load_default()
 
 
 def _line_height(font: Font, padding: int) -> int:
@@ -450,13 +349,17 @@ def _draw_header(
 ) -> None:
     author = _author(tweet)
     name = str(
-        author.get("name")
+        options.get("display_name")
+        or options.get("author_name")
+        or author.get("name")
         or author.get("displayName")
         or author.get("userName")
         or "Unknown"
     )
     username = str(
-        author.get("userName")
+        options.get("username")
+        or options.get("screen_name")
+        or author.get("userName")
         or author.get("username")
         or author.get("screen_name")
         or ""
@@ -526,9 +429,7 @@ def _show_header_actions(options: dict[str, Any]) -> bool:
     return bool(options.get("show_header_actions", DEFAULT_SHOW_HEADER_ACTIONS))
 
 
-def _draw_grok_icon(
-    draw: ImageDraw.ImageDraw, xy: tuple[int, int], size: int
-) -> None:
+def _draw_grok_icon(draw: ImageDraw.ImageDraw, xy: tuple[int, int], size: int) -> None:
     x, y = xy
     box = (x + 3, y + 3, x + size - 3, y + size - 3)
     draw.arc(box, start=35, end=315, fill=BLACK, width=4)
@@ -539,9 +440,7 @@ def _draw_grok_icon(
     )
 
 
-def _draw_more_icon(
-    draw: ImageDraw.ImageDraw, xy: tuple[int, int], size: int
-) -> None:
+def _draw_more_icon(draw: ImageDraw.ImageDraw, xy: tuple[int, int], size: int) -> None:
     x, y = xy
     cy = y + size // 2
     radius = max(2, size // 11)
@@ -619,7 +518,6 @@ def _draw_rich_lines(
     line_height: int,
     *,
     emoji_font: Font | None = None,
-    target_image: Image.Image | None = None,
 ) -> None:
     x0, y = xy
     for line in lines:
@@ -641,15 +539,13 @@ def _draw_rich_lines(
                     embedded_color=embedded_color,
                 )
                 if embedded_color:
-                    text_width = _draw_color_emoji_run(
-                        target_image,
-                        draw,
+                    draw.text(
+                        (x, run_baseline_y),
                         run_text,
-                        run_font,
-                        font,
-                        x,
-                        y,
-                        line_height,
+                        font=run_font,
+                        fill=segment.fill,
+                        anchor="ls",
+                        embedded_color=True,
                     )
                 else:
                     draw.text(
@@ -659,7 +555,7 @@ def _draw_rich_lines(
                         fill=segment.fill,
                         anchor="ls",
                     )
-                    text_width = draw.textlength(run_text, font=run_font)
+                text_width = draw.textlength(run_text, font=run_font)
                 if segment.underline and run_text:
                     underline_y = min(y + line_height - 2, run_baseline_y + 3)
                     draw.line(
@@ -699,187 +595,26 @@ def _inline_run_baseline_y(
     return round(line_center_y - glyph_center_offset)
 
 
-def _draw_color_emoji_run(
-    target_image: Image.Image | None,
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    emoji_font: Font,
-    body_font: Font,
-    x: float,
-    line_top: int,
-    line_height: int,
-) -> float:
-    cell_width = _emoji_cell_width(draw, body_font, line_height)
-    clusters = _split_emoji_clusters(text)
-    if not clusters:
-        return 0.0
-
-    if target_image is None:
-        baseline_y = _inline_run_baseline_y(
-            draw,
-            text,
-            emoji_font,
-            line_top,
-            line_height,
-            _line_baseline(emoji_font, line_top, line_height),
-            embedded_color=True,
-        )
-        draw.text(
-            (x, baseline_y),
-            text,
-            font=emoji_font,
-            fill=BLACK,
-            anchor="ls",
-            embedded_color=True,
-        )
-        return _emoji_run_width(draw, text, emoji_font, line_height, cell_width)
-
-    cursor_x = x
-    for cluster in clusters:
-        emoji_image = _render_emoji_run_image(
-            draw,
-            cluster,
-            emoji_font,
-            line_height,
-            max_width=cell_width,
-        )
-        if emoji_image is None:
-            baseline_y = _inline_run_baseline_y(
-                draw,
-                cluster,
-                emoji_font,
-                line_top,
-                line_height,
-                _line_baseline(emoji_font, line_top, line_height),
-                embedded_color=True,
-            )
-            draw.text(
-                (cursor_x, baseline_y),
-                cluster,
-                font=emoji_font,
-                fill=BLACK,
-                anchor="ls",
-                embedded_color=True,
-            )
-        else:
-            left = round(cursor_x + ((cell_width - emoji_image.width) / 2))
-            top = round(line_top + ((line_height - emoji_image.height) / 2))
-            target_image.paste(emoji_image, (left, top), emoji_image)
-        cursor_x += cell_width
-    return cell_width * len(clusters)
-
-
-def _render_emoji_run_image(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: Font,
-    line_height: int,
-    *,
-    max_width: float | None = None,
-) -> Image.Image | None:
-    bbox = _emoji_text_bbox(draw, text, font)
-    if bbox is None:
-        return None
-
-    natural_width = max(1, bbox[2] - bbox[0])
-    natural_height = max(1, bbox[3] - bbox[1])
-    padding = 2
-    image = Image.new(
-        "RGBA",
-        (natural_width + (padding * 2), natural_height + (padding * 2)),
-        (255, 255, 255, 0),
-    )
-    emoji_draw = ImageDraw.Draw(image)
-    emoji_draw.text(
-        (padding - bbox[0], padding - bbox[1]),
-        text,
-        font=font,
-        fill=BLACK,
-        anchor="ls",
-        embedded_color=True,
-    )
-    alpha_bbox = image.getbbox()
-    if alpha_bbox is None:
-        return None
-    image = image.crop(alpha_bbox)
-
-    max_height = _emoji_max_height(line_height)
-    scale = min(1.0, max_height / image.height)
-    if max_width is not None and max_width > 0:
-        scale = min(scale, max_width / image.width)
-    if scale >= 1.0:
-        return image
-
-    scaled_size = (
-        max(1, round(image.width * scale)),
-        max(1, round(image.height * scale)),
-    )
-    return image.resize(scaled_size, Image.Resampling.LANCZOS)
-
-
-def _emoji_run_width(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: Font,
-    line_height: int,
-    cell_width: float | None = None,
-) -> float:
-    if cell_width is not None:
-        return cell_width * len(_split_emoji_clusters(text))
-    bbox = _emoji_text_bbox(draw, text, font)
-    if bbox is None:
-        return draw.textlength(text, font=font)
-    natural_width = max(1, bbox[2] - bbox[0])
-    natural_height = max(1, bbox[3] - bbox[1])
-    max_height = _emoji_max_height(line_height)
-    if natural_height <= max_height:
-        return float(natural_width)
-    return float(max(1, round(natural_width * (max_height / natural_height))))
-
-
-def _emoji_text_bbox(
-    draw: ImageDraw.ImageDraw,
-    text: str,
-    font: Font,
-) -> tuple[int, int, int, int] | None:
-    try:
-        return draw.textbbox(
-            (0, 0),
-            text,
-            font=font,
-            anchor="ls",
-            embedded_color=True,
-        )
-    except (OSError, TypeError, ValueError):
-        return None
-
-
-def _emoji_max_height(line_height: int) -> int:
-    return max(1, line_height - DEFAULT_EMOJI_LINE_PADDING)
-
-
-def _emoji_cell_width(
-    draw: ImageDraw.ImageDraw,
-    font: Font,
-    line_height: int,
-) -> float:
-    for sample in ("国", "漢", "あ"):
-        try:
-            width = draw.textlength(sample, font=font)
-        except (OSError, TypeError, ValueError):
-            continue
-        if width > 0:
-            return float(width)
-    return float(_emoji_max_height(line_height))
-
-
 def _draw_footer(
     draw: ImageDraw.ImageDraw,
     tweet: dict[str, Any],
     xy: tuple[int, int],
     fonts: dict[str, Font],
 ) -> None:
-    draw.text(xy, _format_created_at(tweet), font=fonts["footer"], fill=GRAY)
+    x = float(xy[0])
+    y = xy[1]
+    view_count = _extract_view_count(tweet)
+    if view_count is None:
+        draw.text((x, y), _format_created_at(tweet), font=fonts["footer"], fill=GRAY)
+        return
+
+    prefix = f"{_format_created_at(tweet)} · "
+    views_text = _format_view_count(view_count)
+    draw.text((x, y), prefix, font=fonts["footer"], fill=GRAY)
+    x += draw.textlength(prefix, font=fonts["footer"])
+    draw.text((x, y), views_text, font=fonts["footer_bold"], fill=BLACK)
+    x += draw.textlength(views_text, font=fonts["footer_bold"])
+    draw.text((x, y), " 浏览", font=fonts["footer"], fill=GRAY)
 
 
 def _draw_footer_logo(
@@ -993,7 +728,7 @@ def _parse_rich_text(tweet: dict[str, Any]) -> list[TextSegment]:
         raw_token = match.group(0)
         if raw_token.startswith("http://") or raw_token.startswith("https://"):
             token, trailing = _split_url_trailing_punctuation(raw_token)
-            display = display_map.get(token, _format_plain_url_display(token))
+            display = display_map.get(token, token)
             segments.append(TextSegment(display, "link", BLUE, True))
             if trailing:
                 segments.append(TextSegment(trailing))
@@ -1012,21 +747,11 @@ def _tweet_for_body_text(
     tweet: dict[str, Any],
     options: dict[str, Any],
 ) -> dict[str, Any]:
-    raw_text = (
-        str(options.get("text_override") or "")
-        if "text_override" in options
-        else str(tweet.get("text") or "")
-    )
-    render_text = _normalize_text_for_rendering(raw_text)
-    if "text_override" not in options and render_text == raw_text:
+    if "text_override" not in options:
         return tweet
     body_tweet = dict(tweet)
-    body_tweet["text"] = render_text
+    body_tweet["text"] = str(options.get("text_override") or "")
     return body_tweet
-
-
-def _normalize_text_for_rendering(text: str) -> str:
-    return text.translate(TEXT_GLYPH_COMPATIBILITY_MAP)
 
 
 def _split_url_trailing_punctuation(raw_url: str) -> tuple[str, str]:
@@ -1036,21 +761,6 @@ def _split_url_trailing_punctuation(raw_url: str) -> tuple[str, str]:
         trailing = token[-1] + trailing
         token = token[:-1]
     return token, trailing
-
-
-def _format_plain_url_display(raw_url: str) -> str:
-    parsed = urlparse(raw_url)
-    if not parsed.scheme or not parsed.netloc:
-        return raw_url
-
-    display = parsed.netloc + parsed.path
-    if parsed.params:
-        display += f";{parsed.params}"
-    if parsed.query:
-        display += f"?{parsed.query}"
-    if parsed.fragment:
-        display += f"#{parsed.fragment}"
-    return display or raw_url
 
 
 def _url_display_map(tweet: dict[str, Any]) -> dict[str, str]:
@@ -1076,7 +786,6 @@ def _wrap_segments(
     max_width: int,
     *,
     emoji_font: Font | None = None,
-    line_height: int | None = None,
 ) -> list[list[TextSegment]]:
     lines: list[list[TextSegment]] = []
     current: list[TextSegment] = []
@@ -1102,7 +811,7 @@ def _wrap_segments(
             piece_segment = TextSegment(
                 piece, segment.kind, segment.fill, segment.underline
             )
-            piece_width = _textlength(draw, piece, font, emoji_font, line_height)
+            piece_width = _textlength(draw, piece, font, emoji_font)
             if current and current_width + piece_width > max_width:
                 flush()
                 if piece.isspace():
@@ -1119,15 +828,8 @@ def _wrap_segments(
                 font,
                 max_width,
                 emoji_font,
-                line_height,
             ):
-                char_width = _textlength(
-                    draw,
-                    char_segment.text,
-                    font,
-                    emoji_font,
-                    line_height,
-                )
+                char_width = _textlength(draw, char_segment.text, font, emoji_font)
                 if current and current_width + char_width > max_width:
                     flush()
                 current.append(char_segment)
@@ -1153,20 +855,16 @@ def _break_long_piece(
     font: Font,
     max_width: int,
     emoji_font: Font | None = None,
-    line_height: int | None = None,
 ) -> list[TextSegment]:
     pieces: list[TextSegment] = []
     current = ""
-    for unit in _split_text_units(segment.text):
-        candidate = current + unit
-        if (
-            current
-            and _textlength(draw, candidate, font, emoji_font, line_height) > max_width
-        ):
+    for char in segment.text:
+        candidate = current + char
+        if current and _textlength(draw, candidate, font, emoji_font) > max_width:
             pieces.append(
                 TextSegment(current, segment.kind, segment.fill, segment.underline)
             )
-            current = unit
+            current = char
         else:
             current = candidate
     if current:
@@ -1181,26 +879,10 @@ def _textlength(
     text: str,
     font: Font,
     emoji_font: Font | None = None,
-    line_height: int | None = None,
 ) -> float:
-    resolved_line_height = line_height or _line_height(
-        font,
-        DEFAULT_BODY_LINE_PADDING,
-    )
-    emoji_cell_width = _emoji_cell_width(draw, font, resolved_line_height)
     return sum(
-        (
-            _emoji_run_width(
-                draw,
-                run_text,
-                run_font,
-                resolved_line_height,
-                emoji_cell_width,
-            )
-            if embedded_color
-            else draw.textlength(run_text, font=run_font)
-        )
-        for run_text, run_font, embedded_color in _iter_font_runs(
+        draw.textlength(run_text, font=run_font)
+        for run_text, run_font, _embedded_color in _iter_font_runs(
             text,
             font,
             emoji_font,
@@ -1219,109 +901,22 @@ def _iter_font_runs(
     runs: list[tuple[str, Font, bool]] = []
     current = ""
     current_is_emoji = False
-    for unit in _split_text_units(text):
-        is_emoji = _is_emoji_unit(unit)
+    for char in text:
+        is_emoji = _is_emoji_char(char)
         if current and is_emoji != current_is_emoji:
             runs.append(
                 (current, emoji_font if current_is_emoji else font, current_is_emoji)
             )
-            current = unit
+            current = char
         else:
-            current += unit
+            current += char
         current_is_emoji = is_emoji
 
     if current:
-        runs.append((current, emoji_font if current_is_emoji else font, current_is_emoji))
+        runs.append(
+            (current, emoji_font if current_is_emoji else font, current_is_emoji)
+        )
     return runs
-
-
-def _split_text_units(text: str) -> list[str]:
-    units: list[str] = []
-    index = 0
-    while index < len(text):
-        keycap_cluster, next_index = _read_keycap_cluster(text, index)
-        if keycap_cluster is not None:
-            units.append(keycap_cluster)
-            index = next_index
-            continue
-
-        char = text[index]
-        if not _is_emoji_char(char):
-            units.append(char)
-            index += 1
-            continue
-
-        cluster, index = _read_emoji_cluster(text, index)
-        units.append(cluster)
-    return units
-
-
-def _split_emoji_clusters(text: str) -> list[str]:
-    clusters: list[str] = []
-    index = 0
-    while index < len(text):
-        keycap_cluster, next_index = _read_keycap_cluster(text, index)
-        if keycap_cluster is not None:
-            clusters.append(keycap_cluster)
-            index = next_index
-            continue
-
-        cluster, index = _read_emoji_cluster(text, index)
-        if cluster:
-            clusters.append(cluster)
-    return clusters
-
-
-def _read_keycap_cluster(text: str, start: int) -> tuple[str | None, int]:
-    if text[start] not in "#*0123456789":
-        return None, start
-
-    index = start + 1
-    if index < len(text) and ord(text[index]) in EMOJI_VARIATION_SELECTORS:
-        index += 1
-    if index < len(text) and ord(text[index]) == 0x20E3:
-        return text[start : index + 1], index + 1
-    return None, start
-
-
-def _read_emoji_cluster(text: str, start: int) -> tuple[str, int]:
-    index = start + 1
-    if _is_regional_indicator(text[start]):
-        if index < len(text) and _is_regional_indicator(text[index]):
-            index += 1
-        return text[start:index], index
-
-    while index < len(text):
-        char = text[index]
-        if _is_emoji_combining_mark(char):
-            index += 1
-            continue
-        if char == "\u200d" and index + 1 < len(text):
-            index += 2
-            continue
-        break
-    return text[start:index], index
-
-
-def _is_emoji_combining_mark(char: str) -> bool:
-    codepoint = ord(char)
-    return (
-        codepoint in EMOJI_VARIATION_SELECTORS
-        or codepoint in EMOJI_MODIFIER_RANGE
-        or codepoint == 0x20E3
-        or 0xE0020 <= codepoint <= 0xE007F
-    )
-
-
-def _is_regional_indicator(char: str) -> bool:
-    return ord(char) in REGIONAL_INDICATOR_RANGE
-
-
-def _is_emoji_unit(text: str) -> bool:
-    if not text:
-        return False
-    keycap_cluster, _next_index = _read_keycap_cluster(text, 0)
-    return keycap_cluster == text or _is_emoji_char(text[0])
 
 
 def _is_emoji_char(char: str) -> bool:
@@ -1329,15 +924,16 @@ def _is_emoji_char(char: str) -> bool:
     return (
         0x1F000 <= codepoint <= 0x1FAFF
         or 0x2600 <= codepoint <= 0x27BF
-        or codepoint == 0x200D
-        or codepoint in EMOJI_VARIATION_SELECTORS
-        or codepoint == 0x20E3
-        or 0xE0020 <= codepoint <= 0xE007F
+        or codepoint in {0x200D, 0xFE0E, 0xFE0F}
     )
 
 
 def _format_footer(tweet: dict[str, Any]) -> str:
-    return _format_created_at(tweet)
+    parts = [_format_created_at(tweet)]
+    view_count = _extract_view_count(tweet)
+    if view_count is not None:
+        parts.append(f"{_format_view_count(view_count)} 浏览")
+    return " · ".join(parts)
 
 
 def _format_card_source_line(tweet: dict[str, Any]) -> str | None:
@@ -1428,6 +1024,37 @@ def _parse_created_at(value: Any) -> datetime | None:
     return parsed_at
 
 
+def _extract_view_count(tweet: dict[str, Any]) -> int | None:
+    candidates = (
+        tweet.get("viewCount"),
+        tweet.get("view_count"),
+        tweet.get("views"),
+        (tweet.get("public_metrics") or {}).get("impression_count")
+        if isinstance(tweet.get("public_metrics"), dict)
+        else None,
+    )
+    for candidate in candidates:
+        if candidate is None or candidate == "":
+            continue
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _format_view_count(value: int) -> str:
+    value = int(value)
+    sign = "-" if value < 0 else ""
+    value = abs(value)
+    for threshold, suffix in ((1_000_000_000, "B"), (1_000_000, "M"), (1_000, "K")):
+        if value >= threshold:
+            compact = (value // (threshold // 10)) / 10
+            text = f"{compact:.1f}".rstrip("0").rstrip(".")
+            return f"{sign}{text}{suffix}"
+    return f"{sign}{value}"
+
+
 def _load_avatar(
     tweet: dict[str, Any], options: dict[str, Any], size: int
 ) -> Image.Image:
@@ -1483,11 +1110,15 @@ def _load_source_logo(
 
 
 def _source_logo_position(options: dict[str, Any]) -> str:
-    raw_position = str(
-        options.get("source_logo_position")
-        or options.get("logo_position")
-        or DEFAULT_SOURCE_LOGO_POSITION
-    ).strip().lower()
+    raw_position = (
+        str(
+            options.get("source_logo_position")
+            or options.get("logo_position")
+            or DEFAULT_SOURCE_LOGO_POSITION
+        )
+        .strip()
+        .lower()
+    )
     if raw_position in {"body", "inline", "content"}:
         return "body"
     return "footer"
@@ -1595,9 +1226,7 @@ def _extract_card_image_candidates(
             _extract_explicit_nested_card_image_candidates(value, key_hint, depth)
         )
         candidates.extend(
-            _extract_direct_card_image_source_candidates(
-                value, key_hint, width, height
-            )
+            _extract_direct_card_image_source_candidates(value, key_hint, width, height)
         )
         candidates.extend(
             _extract_hinted_nested_card_image_candidates(value, key_hint, depth)
@@ -1892,7 +1521,7 @@ def _placeholder_avatar(tweet: dict[str, Any], size: int) -> Image.Image:
     initial = (name.strip()[:1] or "?").upper()
     image = Image.new("RGB", (size, size), (29, 155, 240))
     draw = ImageDraw.Draw(image)
-    font = _load_font([], max(16, size // 2), require_cjk=False)
+    font = _load_font([], max(16, size // 2))
     bbox = draw.textbbox((0, 0), initial, font=font)
     draw.text(
         ((size - (bbox[2] - bbox[0])) / 2, (size - (bbox[3] - bbox[1])) / 2 - 2),

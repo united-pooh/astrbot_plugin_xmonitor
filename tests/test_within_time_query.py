@@ -2,84 +2,40 @@ from __future__ import annotations
 
 import ast
 import unittest
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from config import normalize_check_interval_minutes, validate_check_interval_minutes
+from tweet_helpers import build_search_query
+from twitter_client import TwitterClient
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MAIN_PATH = REPO_ROOT / "main.py"
 
 
-def _load_xmonitor_methods() -> dict[str, str]:
-    source = MAIN_PATH.read_text()
-    module = ast.parse(source)
-    class_node = next(
-        node
-        for node in module.body
-        if isinstance(node, ast.ClassDef) and node.name == "XMonitor"
-    )
-    return {
-        node.name: ast.get_source_segment(source, node)
-        for node in class_node.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-
-
 class WithinTimeQueryTest(unittest.TestCase):
     def test_query_uses_configured_within_time_minutes(self) -> None:
-        methods = _load_xmonitor_methods()
-        namespace: dict[str, object] = {}
-        exec(
-            "from __future__ import annotations\n"
-            + methods["_validate_check_interval_minutes"],
-            namespace,
-        )
-        exec(methods["_target_account_name"], namespace)
-        exec(methods["_build_search_query"], namespace)
-
-        class Probe:
-            _validate_check_interval_minutes = staticmethod(
-                namespace["_validate_check_interval_minutes"]
-            )
-            _target_account_name = namespace["_target_account_name"]
-            _build_search_query = namespace["_build_search_query"]
-
-        probe = Probe()
-        probe.target_account = "@Blue_ArchiveJP"
-        probe.check_interval_minutes = probe._validate_check_interval_minutes(10)
+        query = build_search_query("@Blue_ArchiveJP", 10)
 
         self.assertEqual(
-            probe._build_search_query(),
+            query,
             "from:Blue_ArchiveJP include:nativeretweets within_time:10m",
         )
-        self.assertNotIn("since_time:", probe._build_search_query())
-        self.assertNotIn("until_time:", probe._build_search_query())
+        self.assertNotIn("since_time:", query)
+        self.assertNotIn("until_time:", query)
 
     def test_check_interval_must_be_positive_minutes(self) -> None:
-        methods = _load_xmonitor_methods()
-        namespace: dict[str, object] = {}
-        exec(
-            "from __future__ import annotations\n"
-            + methods["_validate_check_interval_minutes"],
-            namespace,
-        )
-
-        validate = namespace["_validate_check_interval_minutes"]
         with self.assertRaises(ValueError):
-            validate(0)
+            validate_check_interval_minutes(0)
         with self.assertRaises(ValueError):
-            validate(-1)
+            validate_check_interval_minutes(-1)
 
-    def test_check_interval_is_always_interpreted_as_minutes(self) -> None:
-        methods = _load_xmonitor_methods()
-        namespace: dict[str, object] = {}
-        exec(
-            "from __future__ import annotations\n"
-            + methods["_validate_check_interval_minutes"],
-            namespace,
-        )
+    def test_check_interval_accepts_large_minute_windows(self) -> None:
+        self.assertEqual(validate_check_interval_minutes(120), 120)
 
-        validate = namespace["_validate_check_interval_minutes"]
-        self.assertEqual(validate(120), 120)
+    def test_check_interval_is_not_reinterpreted_by_value(self) -> None:
+        self.assertEqual(normalize_check_interval_minutes(600), (600, False))
+        self.assertEqual(normalize_check_interval_minutes(120), (120, False))
+        self.assertEqual(normalize_check_interval_minutes(10), (10, False))
 
     def test_manual_command_uses_astrbot_alias_argument(self) -> None:
         source = MAIN_PATH.read_text()
@@ -122,49 +78,6 @@ class WithinTimeQueryTest(unittest.TestCase):
 
 
 class FetchPathTest(unittest.IsolatedAsyncioTestCase):
-    def _build_probe_class(self, httpx_module=None):
-        methods = _load_xmonitor_methods()
-        namespace: dict[str, object] = {
-            "datetime": datetime,
-            "timedelta": timedelta,
-            "timezone": timezone,
-            "httpx": httpx_module,
-        }
-        for method_name in (
-            "_validate_check_interval_minutes",
-            "_target_account_name",
-            "_build_search_query",
-            "_extract_tweet_id",
-            "_parse_tweet_datetime",
-            "_dedupe_tweets",
-            "_fetch_tweet_search_window",
-            "_fetch_new_tweets",
-        ):
-            exec(
-                "from __future__ import annotations\n" + methods[method_name],
-                namespace,
-            )
-
-        class Probe:
-            TWITTER_SEARCH_URL = (
-                "https://api.twitterapi.io/twitter/tweet/advanced_search"
-            )
-            _validate_check_interval_minutes = staticmethod(
-                namespace["_validate_check_interval_minutes"]
-            )
-            _extract_tweet_id = staticmethod(namespace["_extract_tweet_id"])
-            _parse_tweet_datetime = staticmethod(namespace["_parse_tweet_datetime"])
-            _target_account_name = namespace["_target_account_name"]
-            _build_search_query = namespace["_build_search_query"]
-            _dedupe_tweets = namespace["_dedupe_tweets"]
-            _fetch_tweet_search_window = namespace["_fetch_tweet_search_window"]
-            _fetch_new_tweets = namespace["_fetch_new_tweets"]
-
-            async def _ensure_target_avatar_cached(self, client):
-                self.avatar_cache_client = client
-
-        return Probe
-
     async def test_fetch_window_uses_latest_query_and_api_key(self) -> None:
         class Response:
             def raise_for_status(self) -> None:
@@ -181,18 +94,18 @@ class FetchPathTest(unittest.IsolatedAsyncioTestCase):
                 self.calls.append((url, headers, params))
                 return Response()
 
-        Probe = self._build_probe_class()
-        probe = Probe()
-        probe.api_key = "secret"
-        probe.target_account = "@Blue_ArchiveJP"
-        probe.check_interval_minutes = 10
         client = Client()
+        twitter_client = TwitterClient(
+            api_key="secret",
+            target_account="@Blue_ArchiveJP",
+            check_interval_minutes=10,
+        )
 
-        await probe._fetch_tweet_search_window(client)
+        await twitter_client.fetch_search_window(client)
 
         self.assertEqual(len(client.calls), 1)
         url, headers, params = client.calls[0]
-        self.assertEqual(url, probe.TWITTER_SEARCH_URL)
+        self.assertEqual(url, twitter_client.TWITTER_SEARCH_URL)
         self.assertEqual(headers, {"X-API-Key": "secret"})
         self.assertEqual(params["queryType"], "Latest")
         self.assertEqual(
@@ -212,14 +125,14 @@ class FetchPathTest(unittest.IsolatedAsyncioTestCase):
             async def get(self, url, *, headers, params):
                 return Response()
 
-        Probe = self._build_probe_class()
-        probe = Probe()
-        probe.api_key = "secret"
-        probe.target_account = "Blue_ArchiveJP"
-        probe.check_interval_minutes = 10
+        twitter_client = TwitterClient(
+            api_key="secret",
+            target_account="Blue_ArchiveJP",
+            check_interval_minutes=10,
+        )
 
         with self.assertRaisesRegex(RuntimeError, "bad query"):
-            await probe._fetch_tweet_search_window(Client())
+            await twitter_client.fetch_search_window(Client())
 
     async def test_fetch_new_tweets_dedupes_and_sorts_response(self) -> None:
         class Response:
@@ -262,26 +175,26 @@ class FetchPathTest(unittest.IsolatedAsyncioTestCase):
             def AsyncClient(*, timeout):
                 return Client()
 
-        Probe = self._build_probe_class(FakeHttpx)
-        probe = Probe()
-        probe.api_key = "secret"
-        probe.target_account = "Blue_ArchiveJP"
-        probe.check_interval_minutes = 10
+        twitter_client = TwitterClient(
+            api_key="secret",
+            target_account="Blue_ArchiveJP",
+            check_interval_minutes=10,
+            httpx_module=FakeHttpx,
+        )
 
-        tweets = await probe._fetch_new_tweets()
+        tweets = await twitter_client.fetch_recent_tweets()
 
         self.assertEqual([tweet["id"] for tweet in tweets], ["1", "2"])
-        self.assertIsInstance(probe.avatar_cache_client, Client)
 
     async def test_fetch_new_tweets_requires_api_key(self) -> None:
-        Probe = self._build_probe_class()
-        probe = Probe()
-        probe.api_key = ""
-        probe.target_account = "Blue_ArchiveJP"
-        probe.check_interval_minutes = 10
+        twitter_client = TwitterClient(
+            api_key="",
+            target_account="Blue_ArchiveJP",
+            check_interval_minutes=10,
+        )
 
         with self.assertRaisesRegex(RuntimeError, "API key"):
-            await probe._fetch_new_tweets()
+            await twitter_client.fetch_recent_tweets()
 
 
 if __name__ == "__main__":
