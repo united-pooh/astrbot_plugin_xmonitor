@@ -45,29 +45,39 @@
     "default": "你是一个推文翻译助手。请把用户提供的 X/Twitter 推文正文翻译成简体中文，保留链接、话题标签、换行和 emoji，只输出译文正文。"
   },
   "GROUP_RENDER_OVERRIDES": {
-    "description": "按群号覆盖推文显示身份；key 为 group_id，value 可包含 user_name、display_name、username、avatar。avatar 推荐通过 /xmonitor config avatar 指令从 profilePicture 自动写入",
-    "type": "dict",
-    "default": {},
-    "template_schema": {
-      "user_name": {
-        "type": "string",
-        "default": "",
-        "description": "用于记录头像来源的 X 用户名"
-      },
-      "display_name": {
-        "type": "string",
-        "default": "",
-        "description": "推文卡片顶部显示名"
-      },
-      "username": {
-        "type": "string",
-        "default": "",
-        "description": "推文卡片用户名，可带或不带 @"
-      },
-      "avatar": {
-        "type": "string",
-        "default": "",
-        "description": "头像 URL，通常来自 TwitterAPI.io 用户资料 profilePicture"
+    "description": "按群号覆盖推文显示身份；每条配置包含 group_id、user_name、display_name、username、avatar。avatar 推荐通过 /xmonitor config avatar 指令从 profilePicture 自动写入",
+    "type": "template_list",
+    "default": [],
+    "templates": {
+      "group": {
+        "name": "群身份覆盖",
+        "items": {
+          "group_id": {
+            "type": "string",
+            "default": "",
+            "description": "群号"
+          },
+          "user_name": {
+            "type": "string",
+            "default": "",
+            "description": "用于记录头像来源的 X 用户名"
+          },
+          "display_name": {
+            "type": "string",
+            "default": "",
+            "description": "推文卡片顶部显示名"
+          },
+          "username": {
+            "type": "string",
+            "default": "",
+            "description": "推文卡片用户名，可带或不带 @"
+          },
+          "avatar": {
+            "type": "string",
+            "default": "",
+            "description": "头像 URL，通常来自 TwitterAPI.io 用户资料 profilePicture"
+          }
+        }
       }
     }
   }

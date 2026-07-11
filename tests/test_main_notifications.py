@@ -539,6 +539,30 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("翻译 Provider：provider-1", result)
         self.assertIn("当前群 group-1：群名 / @group_user / 头像已配置", result)
 
+    async def test_runtime_config_reads_template_list_group_overrides(self) -> None:
+        config = _runtime_config(
+            GROUP_RENDER_OVERRIDES=[
+                {
+                    "__template_key": "group",
+                    "group_id": "group-1",
+                    "display_name": "群名",
+                    "username": "group_user",
+                    "avatar": "https://pbs.twimg.com/avatar.jpg",
+                }
+            ],
+        )
+
+        runtime_config = load_runtime_config(config, base_dir=REPO_ROOT)
+
+        self.assertEqual(
+            runtime_config.render_options_for_group("group-1"),
+            {
+                "avatar": "https://pbs.twimg.com/avatar.jpg",
+                "display_name": "群名",
+                "username": "group_user",
+            },
+        )
+
     async def test_config_identity_command_updates_group_override(self) -> None:
         config = _runtime_config()
         service = _command_service(config=config)
@@ -552,8 +576,15 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("已为群 group-1 配置显示身份", result)
         self.assertEqual(
-            config["GROUP_RENDER_OVERRIDES"]["group-1"],
-            {"display_name": "群渲染名", "username": "group_user"},
+            config["GROUP_RENDER_OVERRIDES"],
+            [
+                {
+                    "__template_key": "group",
+                    "group_id": "group-1",
+                    "display_name": "群渲染名",
+                    "username": "group_user",
+                }
+            ],
         )
         self.assertEqual(config.save_count, 1)
 
@@ -579,13 +610,17 @@ class MainNotificationTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("已为群 group-1 配置头像", result)
         self.assertEqual(
-            config["GROUP_RENDER_OVERRIDES"]["group-1"],
-            {
-                "user_name": "Blue_ArchiveJP",
-                "display_name": "Blue Archive",
-                "username": "Blue_ArchiveJP",
-                "avatar": "https://pbs.twimg.com/profile.jpg",
-            },
+            config["GROUP_RENDER_OVERRIDES"],
+            [
+                {
+                    "__template_key": "group",
+                    "group_id": "group-1",
+                    "user_name": "Blue_ArchiveJP",
+                    "display_name": "Blue Archive",
+                    "username": "Blue_ArchiveJP",
+                    "avatar": "https://pbs.twimg.com/profile.jpg",
+                }
+            ],
         )
         self.assertEqual(config.save_count, 1)
 

@@ -11,6 +11,7 @@ except ImportError:  # pragma: no cover - direct test import fallback.
 
 
 ConfigMapping = MutableMapping[str, Any]
+GROUP_RENDER_OVERRIDE_TEMPLATE_KEY = "group"
 
 
 @dataclass(frozen=True)
@@ -169,11 +170,22 @@ def normalize_group_render_overrides(
     raw_value: Any,
     base_dir: Path,
 ) -> dict[str, RenderProfile]:
-    if not isinstance(raw_value, dict):
-        return {}
-
     overrides: dict[str, RenderProfile] = {}
-    for group_id, profile in raw_value.items():
+    if isinstance(raw_value, dict):
+        entries = list(raw_value.items())
+    elif isinstance(raw_value, list):
+        entries = [
+            (
+                item.get("group_id") or item.get("groupId") or item.get("group"),
+                item,
+            )
+            for item in raw_value
+            if isinstance(item, dict)
+        ]
+    else:
+        return overrides
+
+    for group_id, profile in entries:
         normalized_group_id = normalize_optional_text(group_id)
         if normalized_group_id is None:
             continue
@@ -181,6 +193,24 @@ def normalize_group_render_overrides(
         if normalized_profile.to_config():
             overrides[normalized_group_id] = normalized_profile
     return overrides
+
+
+def serialize_group_render_overrides(
+    overrides: dict[str, RenderProfile],
+) -> list[dict[str, str]]:
+    serialized: list[dict[str, str]] = []
+    for group_id, profile in overrides.items():
+        profile_config = profile.to_config()
+        if not profile_config:
+            continue
+        serialized.append(
+            {
+                "__template_key": GROUP_RENDER_OVERRIDE_TEMPLATE_KEY,
+                "group_id": group_id,
+                **profile_config,
+            }
+        )
+    return serialized
 
 
 def validate_check_interval_minutes(raw_value: Any) -> int:
@@ -266,21 +296,17 @@ def set_group_render_profile(
     if normalized_group_id is None:
         raise ValueError("缺少 group_id")
 
-    raw_overrides = config.get("GROUP_RENDER_OVERRIDES", {})
-    if not isinstance(raw_overrides, dict):
-        raw_overrides = {}
-    else:
-        raw_overrides = dict(raw_overrides)
-
-    existing = raw_overrides.get(normalized_group_id, {})
-    if not isinstance(existing, dict):
-        existing = {}
-    merged_profile = dict(existing)
+    raw_overrides = normalize_group_render_overrides(
+        config.get("GROUP_RENDER_OVERRIDES", {}),
+        base_dir,
+    )
+    existing = raw_overrides.get(normalized_group_id)
+    merged_profile = existing.to_config() if existing is not None else {}
     merged_profile.update(profile_update)
     normalized_profile = normalize_render_profile(merged_profile, base_dir)
 
-    raw_overrides[normalized_group_id] = normalized_profile.to_config()
-    config["GROUP_RENDER_OVERRIDES"] = raw_overrides
+    raw_overrides[normalized_group_id] = normalized_profile
+    config["GROUP_RENDER_OVERRIDES"] = serialize_group_render_overrides(raw_overrides)
     save_config(config)
     return normalized_profile
 
